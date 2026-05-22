@@ -656,10 +656,25 @@ func buildNASRegisterIndicationsTLVs(cfg NASIndicationRegistration) []TLV {
 
 // InitiateNetworkRegister starts network registration selection.
 func (n *NASService) InitiateNetworkRegister(ctx context.Context, req NASInitiateNetworkRegisterRequest) error {
-	buf := make([]byte, 5)
-	buf[0] = uint8(req.Mode)
-	binary.LittleEndian.PutUint16(buf[1:3], req.MCC)
-	binary.LittleEndian.PutUint16(buf[3:5], req.MNC)
+	tlvs := buildNASInitiateNetworkRegisterTLVs(req)
+	resp, err := n.client.SendRequest(ctx, ServiceNAS, n.clientID, NASInitiateNetworkRegister, tlvs)
+	if err != nil {
+		return err
+	}
+	if err := resp.CheckResult(); err != nil {
+		return fmt.Errorf("initiate network register failed: %w", err)
+	}
+	return nil
+}
+
+func buildNASInitiateNetworkRegisterTLVs(req NASInitiateNetworkRegisterRequest) []TLV {
+	buf := []byte{uint8(req.Mode)}
+	if req.Mode == NASNetworkRegisterManual {
+		buf = make([]byte, 5)
+		buf[0] = uint8(req.Mode)
+		binary.LittleEndian.PutUint16(buf[1:3], req.MCC)
+		binary.LittleEndian.PutUint16(buf[3:5], req.MNC)
+	}
 	tlvs := []TLV{{Type: 0x01, Value: buf}}
 	if req.RadioAccessTech != 0 {
 		tlvs = append(tlvs, NewTLVUint8(0x10, req.RadioAccessTech))
@@ -670,14 +685,7 @@ func (n *NASService) InitiateNetworkRegister(ctx context.Context, req NASInitiat
 	if req.HasChangeDuration {
 		tlvs = append(tlvs, NewTLVUint8(0x12, req.ChangeDuration))
 	}
-	resp, err := n.client.SendRequest(ctx, ServiceNAS, n.clientID, NASInitiateNetworkRegister, tlvs)
-	if err != nil {
-		return err
-	}
-	if err := resp.CheckResult(); err != nil {
-		return fmt.Errorf("initiate network register failed: %w", err)
-	}
-	return nil
+	return tlvs
 }
 
 // AttachDetach controls PS attach state.
@@ -946,15 +954,16 @@ func buildSystemSelectionPreferenceTLVs(pref SystemSelectionPreference) ([]TLV, 
 	if pref.HasTDSCDMABandPreference {
 		tlvs = append(tlvs, newTLVUint64(0x1D, pref.TDSCDMABandPreference))
 	}
-	if pref.HasNetworkSelectionPreference || pref.HasManualNetworkSelection {
+	if pref.HasNetworkSelectionPreference && !pref.HasManualNetworkSelection {
+		tlvs = append(tlvs, NewTLVUint8(0x16, pref.NetworkSelectionPreference))
+	}
+	if pref.HasManualNetworkSelection {
 		mode := pref.NetworkSelectionPreference
 		mcc := uint16(0)
 		mnc := uint16(0)
-		if pref.HasManualNetworkSelection {
-			mode = NASNetworkSelectionManual
-			mcc = pref.ManualNetworkSelection.MCC
-			mnc = pref.ManualNetworkSelection.MNC
-		}
+		mode = NASNetworkSelectionManual
+		mcc = pref.ManualNetworkSelection.MCC
+		mnc = pref.ManualNetworkSelection.MNC
 		buf := make([]byte, 5)
 		buf[0] = mode
 		binary.LittleEndian.PutUint16(buf[1:3], mcc)

@@ -64,6 +64,54 @@ func TestParseTechnologyPreferenceResponse(t *testing.T) {
 	}
 }
 
+func TestBuildNASInitiateNetworkRegisterTLVsAutomaticOmitsEmptyPLMN(t *testing.T) {
+	tlvs := buildNASInitiateNetworkRegisterTLVs(NASInitiateNetworkRegisterRequest{
+		Mode: NASNetworkRegisterAutomatic,
+	})
+
+	if len(tlvs) != 1 {
+		t.Fatalf("expected 1 TLV, got %d", len(tlvs))
+	}
+	if tlvs[0].Type != 0x01 {
+		t.Fatalf("unexpected TLV type: 0x%02X", tlvs[0].Type)
+	}
+	if got, want := tlvs[0].Value, []byte{byte(NASNetworkRegisterAutomatic)}; string(got) != string(want) {
+		t.Fatalf("automatic network info TLV = % X, want % X", got, want)
+	}
+}
+
+func TestBuildNASInitiateNetworkRegisterTLVsManualIncludesPLMN(t *testing.T) {
+	tlvs := buildNASInitiateNetworkRegisterTLVs(NASInitiateNetworkRegisterRequest{
+		Mode:             NASNetworkRegisterManual,
+		MCC:              460,
+		MNC:              1,
+		RadioAccessTech:  0x08,
+		IncludesPCSDigit: true,
+	})
+
+	if len(tlvs) != 3 {
+		t.Fatalf("expected 3 TLVs, got %d", len(tlvs))
+	}
+	if tlvs[0].Type != 0x01 || len(tlvs[0].Value) != 5 {
+		t.Fatalf("unexpected manual network info TLV: %+v", tlvs[0])
+	}
+	if tlvs[0].Value[0] != byte(NASNetworkRegisterManual) {
+		t.Fatalf("manual network action = %d, want %d", tlvs[0].Value[0], NASNetworkRegisterManual)
+	}
+	if got := binary.LittleEndian.Uint16(tlvs[0].Value[1:3]); got != 460 {
+		t.Fatalf("manual MCC = %d, want 460", got)
+	}
+	if got := binary.LittleEndian.Uint16(tlvs[0].Value[3:5]); got != 1 {
+		t.Fatalf("manual MNC = %d, want 1", got)
+	}
+	if tlvs[1].Type != 0x10 || tlvs[1].Value[0] != 0x08 {
+		t.Fatalf("unexpected RAT TLV: %+v", tlvs[1])
+	}
+	if tlvs[2].Type != 0x11 || tlvs[2].Value[0] != 0x01 {
+		t.Fatalf("unexpected PCS digit TLV: %+v", tlvs[2])
+	}
+}
+
 func TestGetLTEDuplexModeFromBandInfo(t *testing.T) {
 	tests := []struct {
 		name string
@@ -212,6 +260,25 @@ func TestBuildSystemSelectionPreferenceTLVs(t *testing.T) {
 	}
 	if tlvs[6].Type != 0x24 || len(tlvs[6].Value) != 32 {
 		t.Fatalf("unexpected extended LTE band TLV: %+v", tlvs[6])
+	}
+}
+
+func TestBuildSystemSelectionPreferenceTLVsAutomaticNetworkSelectionOmitsEmptyPLMN(t *testing.T) {
+	tlvs, err := buildSystemSelectionPreferenceTLVs(SystemSelectionPreference{
+		NetworkSelectionPreference:    NASNetworkSelectionAutomatic,
+		HasNetworkSelectionPreference: true,
+	})
+	if err != nil {
+		t.Fatalf("buildSystemSelectionPreferenceTLVs returned error: %v", err)
+	}
+	if len(tlvs) != 1 {
+		t.Fatalf("expected 1 TLV, got %d", len(tlvs))
+	}
+	if tlvs[0].Type != 0x16 {
+		t.Fatalf("unexpected TLV type: 0x%02X", tlvs[0].Type)
+	}
+	if got, want := tlvs[0].Value, []byte{NASNetworkSelectionAutomatic}; string(got) != string(want) {
+		t.Fatalf("automatic network selection TLV = % X, want % X", got, want)
 	}
 }
 
