@@ -53,6 +53,7 @@ const (
 	QMIErrPolicyMismatch         uint16 = 0x004A // Policy mismatch / 策略不匹配
 	QMIErrInvalidProfile         uint16 = 0x0019 // Invalid profile / 无效配置文件
 	QMIErrClientIDsExhausted     uint16 = 0x001F // Client IDs exhausted / 客户端 ID 耗尽
+	QMIErrInvalidRegisterAction  uint16 = 0x0020 // Invalid register action / 无效驻网动作
 	QMIErrInvalidQmiCmd          uint16 = 0x0047 // Invalid QMI command / 不支持的QMI命令
 	QMIErrNotSupported           uint16 = 0x005E // Not supported / 不支持
 	QMIErrOpDeviceUnsupported    uint16 = 0x0034 // Operation not supported by device (EC20 对 WMS 0x004A 的常见回应)

@@ -50,6 +50,7 @@ const (
 	NASSetSystemSelectionPreference uint16 = 0x0033
 	NASGetSystemSelectionPreference uint16 = 0x0034
 	NASGetCellLocationInfo          uint16 = 0x0043
+	NASForceNetworkSearch           uint16 = 0x0067
 	/* Defined in frame.go / 在 frame.go 中定义
 	NASRegisterIndications      uint16 = 0x0003
 	NASGetServingSystem  uint16 = 0x0024
@@ -390,8 +391,8 @@ type NASIndicationRegistration struct {
 type NASNetworkRegisterMode uint8
 
 const (
-	NASNetworkRegisterAutomatic NASNetworkRegisterMode = 0x00
-	NASNetworkRegisterManual    NASNetworkRegisterMode = 0x01
+	NASNetworkRegisterAutomatic NASNetworkRegisterMode = 0x01
+	NASNetworkRegisterManual    NASNetworkRegisterMode = 0x02
 )
 
 type NASInitiateNetworkRegisterRequest struct {
@@ -473,7 +474,7 @@ func (n *NASService) ClientID() uint8 {
 type ServingSystem struct {
 	RegistrationState RegistrationState
 	PSAttached        bool
-	RadioInterface    uint8 // 0=none, 1=CDMA, 2=UMTS, 4=LTE, 5=LTE-M, 6=NR5G / 0=无, 1=CDMA, 2=UMTS, 4=LTE, 5=LTE-M, 6=NR5G
+	RadioInterface    uint8 // common QMI values: 0=none, 4=GSM, 5=UMTS, 8=LTE, 10=NR5G / 常见 QMI 值：0=无, 4=GSM, 5=UMTS, 8=LTE, 10=NR5G
 	MCC               uint16
 	MNC               uint16
 }
@@ -667,23 +668,35 @@ func (n *NASService) InitiateNetworkRegister(ctx context.Context, req NASInitiat
 	return nil
 }
 
-func buildNASInitiateNetworkRegisterTLVs(req NASInitiateNetworkRegisterRequest) []TLV {
-	buf := []byte{uint8(req.Mode)}
-	if req.Mode == NASNetworkRegisterManual {
-		buf = make([]byte, 5)
-		buf[0] = uint8(req.Mode)
-		binary.LittleEndian.PutUint16(buf[1:3], req.MCC)
-		binary.LittleEndian.PutUint16(buf[3:5], req.MNC)
+// ForceNetworkSearch asks the modem to restart network search.
+func (n *NASService) ForceNetworkSearch(ctx context.Context) error {
+	resp, err := n.client.SendRequest(ctx, ServiceNAS, n.clientID, NASForceNetworkSearch, nil)
+	if err != nil {
+		return err
 	}
-	tlvs := []TLV{{Type: 0x01, Value: buf}}
-	if req.RadioAccessTech != 0 {
+	if err := resp.CheckResult(); err != nil {
+		return fmt.Errorf("force network search failed: %w", err)
+	}
+	return nil
+}
+
+func buildNASInitiateNetworkRegisterTLVs(req NASInitiateNetworkRegisterRequest) []TLV {
+	tlvs := []TLV{{Type: 0x01, Value: []byte{uint8(req.Mode)}}}
+	if req.Mode == NASNetworkRegisterManual {
+		buf := make([]byte, 5)
+		binary.LittleEndian.PutUint16(buf[0:2], req.MCC)
+		binary.LittleEndian.PutUint16(buf[2:4], req.MNC)
+		buf[4] = req.RadioAccessTech
+		tlvs = append(tlvs, TLV{Type: 0x10, Value: buf})
+	}
+	if req.Mode != NASNetworkRegisterManual && req.RadioAccessTech != 0 {
 		tlvs = append(tlvs, NewTLVUint8(0x10, req.RadioAccessTech))
 	}
-	if req.IncludesPCSDigit {
-		tlvs = append(tlvs, NewTLVUint8(0x11, 0x01))
-	}
 	if req.HasChangeDuration {
-		tlvs = append(tlvs, NewTLVUint8(0x12, req.ChangeDuration))
+		tlvs = append(tlvs, NewTLVUint8(0x11, req.ChangeDuration))
+	}
+	if req.IncludesPCSDigit {
+		tlvs = append(tlvs, NewTLVUint8(0x12, 0x01))
 	}
 	return tlvs
 }
@@ -954,16 +967,15 @@ func buildSystemSelectionPreferenceTLVs(pref SystemSelectionPreference) ([]TLV, 
 	if pref.HasTDSCDMABandPreference {
 		tlvs = append(tlvs, newTLVUint64(0x1D, pref.TDSCDMABandPreference))
 	}
-	if pref.HasNetworkSelectionPreference && !pref.HasManualNetworkSelection {
-		tlvs = append(tlvs, NewTLVUint8(0x16, pref.NetworkSelectionPreference))
-	}
-	if pref.HasManualNetworkSelection {
+	if pref.HasNetworkSelectionPreference || pref.HasManualNetworkSelection {
 		mode := pref.NetworkSelectionPreference
-		mcc := uint16(0)
-		mnc := uint16(0)
-		mode = NASNetworkSelectionManual
-		mcc = pref.ManualNetworkSelection.MCC
-		mnc = pref.ManualNetworkSelection.MNC
+		var mcc uint16
+		var mnc uint16
+		if pref.HasManualNetworkSelection {
+			mode = NASNetworkSelectionManual
+			mcc = pref.ManualNetworkSelection.MCC
+			mnc = pref.ManualNetworkSelection.MNC
+		}
 		buf := make([]byte, 5)
 		buf[0] = mode
 		binary.LittleEndian.PutUint16(buf[1:3], mcc)

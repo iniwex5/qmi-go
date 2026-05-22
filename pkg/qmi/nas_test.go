@@ -75,7 +75,7 @@ func TestBuildNASInitiateNetworkRegisterTLVsAutomaticOmitsEmptyPLMN(t *testing.T
 	if tlvs[0].Type != 0x01 {
 		t.Fatalf("unexpected TLV type: 0x%02X", tlvs[0].Type)
 	}
-	if got, want := tlvs[0].Value, []byte{byte(NASNetworkRegisterAutomatic)}; string(got) != string(want) {
+	if got, want := tlvs[0].Value, []byte{0x01}; string(got) != string(want) {
 		t.Fatalf("automatic network info TLV = % X, want % X", got, want)
 	}
 }
@@ -92,23 +92,47 @@ func TestBuildNASInitiateNetworkRegisterTLVsManualIncludesPLMN(t *testing.T) {
 	if len(tlvs) != 3 {
 		t.Fatalf("expected 3 TLVs, got %d", len(tlvs))
 	}
-	if tlvs[0].Type != 0x01 || len(tlvs[0].Value) != 5 {
-		t.Fatalf("unexpected manual network info TLV: %+v", tlvs[0])
+	if tlvs[0].Type != 0x01 || len(tlvs[0].Value) != 1 {
+		t.Fatalf("unexpected manual action TLV: %+v", tlvs[0])
 	}
-	if tlvs[0].Value[0] != byte(NASNetworkRegisterManual) {
-		t.Fatalf("manual network action = %d, want %d", tlvs[0].Value[0], NASNetworkRegisterManual)
+	if tlvs[0].Value[0] != 0x02 {
+		t.Fatalf("manual network action = %d, want 2", tlvs[0].Value[0])
 	}
-	if got := binary.LittleEndian.Uint16(tlvs[0].Value[1:3]); got != 460 {
+	if tlvs[1].Type != 0x10 || len(tlvs[1].Value) != 5 {
+		t.Fatalf("unexpected manual info TLV: %+v", tlvs[1])
+	}
+	if got := binary.LittleEndian.Uint16(tlvs[1].Value[0:2]); got != 460 {
 		t.Fatalf("manual MCC = %d, want 460", got)
 	}
-	if got := binary.LittleEndian.Uint16(tlvs[0].Value[3:5]); got != 1 {
+	if got := binary.LittleEndian.Uint16(tlvs[1].Value[2:4]); got != 1 {
 		t.Fatalf("manual MNC = %d, want 1", got)
 	}
-	if tlvs[1].Type != 0x10 || tlvs[1].Value[0] != 0x08 {
-		t.Fatalf("unexpected RAT TLV: %+v", tlvs[1])
+	if tlvs[1].Value[4] != 0x08 {
+		t.Fatalf("manual RAT = 0x%02X, want 0x08", tlvs[1].Value[4])
 	}
-	if tlvs[2].Type != 0x11 || tlvs[2].Value[0] != 0x01 {
+	if tlvs[2].Type != 0x12 || tlvs[2].Value[0] != 0x01 {
 		t.Fatalf("unexpected PCS digit TLV: %+v", tlvs[2])
+	}
+}
+
+func TestBuildNASInitiateNetworkRegisterTLVsChangeDurationUsesLibqmiTLV(t *testing.T) {
+	tlvs := buildNASInitiateNetworkRegisterTLVs(NASInitiateNetworkRegisterRequest{
+		Mode:              NASNetworkRegisterAutomatic,
+		ChangeDuration:    0x01,
+		HasChangeDuration: true,
+	})
+
+	if len(tlvs) != 2 {
+		t.Fatalf("expected 2 TLVs, got %d", len(tlvs))
+	}
+	if tlvs[1].Type != 0x11 || tlvs[1].Value[0] != 0x01 {
+		t.Fatalf("unexpected change duration TLV: %+v", tlvs[1])
+	}
+}
+
+func TestNASForceNetworkSearchMessageIDMatchesLibqmi(t *testing.T) {
+	if NASForceNetworkSearch != 0x0067 {
+		t.Fatalf("NASForceNetworkSearch = 0x%04X, want 0x0067", NASForceNetworkSearch)
 	}
 }
 
@@ -263,7 +287,7 @@ func TestBuildSystemSelectionPreferenceTLVs(t *testing.T) {
 	}
 }
 
-func TestBuildSystemSelectionPreferenceTLVsAutomaticNetworkSelectionOmitsEmptyPLMN(t *testing.T) {
+func TestBuildSystemSelectionPreferenceTLVsAutomaticNetworkSelectionUsesLibqmiSequence(t *testing.T) {
 	tlvs, err := buildSystemSelectionPreferenceTLVs(SystemSelectionPreference{
 		NetworkSelectionPreference:    NASNetworkSelectionAutomatic,
 		HasNetworkSelectionPreference: true,
@@ -277,7 +301,7 @@ func TestBuildSystemSelectionPreferenceTLVsAutomaticNetworkSelectionOmitsEmptyPL
 	if tlvs[0].Type != 0x16 {
 		t.Fatalf("unexpected TLV type: 0x%02X", tlvs[0].Type)
 	}
-	if got, want := tlvs[0].Value, []byte{NASNetworkSelectionAutomatic}; string(got) != string(want) {
+	if got, want := tlvs[0].Value, []byte{NASNetworkSelectionAutomatic, 0x00, 0x00, 0x00, 0x00}; string(got) != string(want) {
 		t.Fatalf("automatic network selection TLV = % X, want % X", got, want)
 	}
 }

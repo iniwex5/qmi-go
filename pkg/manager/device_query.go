@@ -523,6 +523,13 @@ func (m *Manager) NASInitiateNetworkRegister(ctx context.Context, req qmi.NASIni
 	})
 }
 
+// NASForceNetworkSearch 强制 modem 重新搜网
+func (m *Manager) NASForceNetworkSearch(ctx context.Context) error {
+	return m.withNASRecovery("NASForceNetworkSearch", func(nas *qmi.NASService) error {
+		return nas.ForceNetworkSearch(ctx)
+	})
+}
+
 // NASAttachDetach 设置 PS 附着状态
 func (m *Manager) NASAttachDetach(ctx context.Context, attached bool) error {
 	return m.withNASRecovery("NASAttachDetach", func(nas *qmi.NASService) error {
