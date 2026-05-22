@@ -16,7 +16,11 @@ type VOICEService struct {
 }
 
 func NewVOICEService(client *Client) (*VOICEService, error) {
-	clientID, err := client.AllocateClientID(ServiceVOICE)
+	return NewVOICEServiceWithContext(context.Background(), client)
+}
+
+func NewVOICEServiceWithContext(ctx context.Context, client *Client) (*VOICEService, error) {
+	clientID, err := client.AllocateClientIDWithContext(ctx, ServiceVOICE)
 	if err != nil {
 		return nil, err
 	}

@@ -44,6 +44,7 @@ const (
 	EventUIMSessionClosed                                // UIM session closed indication / UIM 会话关闭指示
 	EventUIMRefresh                                      // UIM refresh indication / UIM 刷新指示
 	EventUIMSlotStatus                                   // UIM slot status indication / UIM 卡槽状态指示
+	EventNASEventReport                                  // NAS event report / NAS 事件报告
 )
 
 // Event represents an asynchronous indication from the modem / Event代表来自modem的异步指示
@@ -54,6 +55,16 @@ type Event struct {
 	Packet    *Packet
 }
 
+type ClientLogLevel string
+
+const (
+	ClientLogLevelDebug ClientLogLevel = "debug"
+	ClientLogLevelWarn  ClientLogLevel = "warn"
+	ClientLogLevelError ClientLogLevel = "error"
+)
+
+type ClientLogFunc func(level ClientLogLevel, format string, args ...any)
+
 // ClientOptions controls runtime behavior for the low-level QMI client.
 type ClientOptions struct {
 	SyncOnOpen            bool
@@ -61,6 +72,7 @@ type ClientOptions struct {
 	DefaultRequestTimeout time.Duration
 	TxQueueSize           int
 	IndicationQueueSize   int
+	Logf                  ClientLogFunc
 }
 
 // DefaultClientOptions returns the production defaults used by NewClientWithOptions.
@@ -182,6 +194,14 @@ func normalizeClientOptions(opts ClientOptions) ClientOptions {
 	return opts
 }
 
+func (c *Client) logf(level ClientLogLevel, format string, args ...any) {
+	if c != nil && c.opts.Logf != nil {
+		c.opts.Logf(level, format, args...)
+		return
+	}
+	log.Printf(format, args...)
+}
+
 // NewClientWithOptions creates a new QMI client connected to the given device path.
 func NewClientWithOptions(ctx context.Context, path string, opts ClientOptions) (*Client, error) {
 	opts = normalizeClientOptions(opts)
@@ -227,7 +247,7 @@ func NewClientWithOptions(ctx context.Context, path string, opts ClientOptions) 
 			defer cancel()
 		}
 		if err := c.Sync(syncCtx); err != nil {
-			log.Printf("QMI: initial sync failed (non-fatal): %v", err)
+			c.logf(ClientLogLevelDebug, "QMI: initial sync failed (non-fatal): %v", err)
 		}
 	}
 
@@ -364,7 +384,7 @@ func (c *Client) logLateResponse(key uint32, packet *Packet, recent recentTransa
 	if suppressed > 0 {
 		extra = fmt.Sprintf(", suppressed %d similar late response(s)", suppressed)
 	}
-	log.Printf("QMI: received late response for completed transaction key 0x%08x (MsgID 0x%04x, Service 0x%02x, TxID %d, completed_err %q%s)",
+	c.logf(ClientLogLevelDebug, "QMI: received late response for completed transaction key 0x%08x (MsgID 0x%04x, Service 0x%02x, TxID %d, completed_err %q%s)",
 		key, packet.MessageID, packet.ServiceType, packet.TransactionID, recent.err, extra)
 }
 
@@ -397,7 +417,7 @@ func (c *Client) readLoop() {
 				return
 			default:
 			}
-			log.Printf("QMI: read failed: %v", err)
+			c.logf(ClientLogLevelWarn, "QMI: read failed: %v", err)
 			c.failPendingTransactions(err)
 			return
 		}
@@ -444,7 +464,7 @@ func (c *Client) readLoop() {
 			packet, err := UnmarshalPacket(frame)
 			if err != nil {
 				c.parseErrors.Add(1)
-				log.Printf("QMI: failed to parse packet (%d bytes): %v", frameLen, err)
+				c.logf(ClientLogLevelWarn, "QMI: failed to parse packet (%d bytes): %v", frameLen, err)
 				continue
 			}
 
@@ -467,7 +487,7 @@ func (c *Client) readLoop() {
 					c.logLateResponse(key, packet, recent)
 					continue
 				}
-				log.Printf("QMI: received response with unmatched key 0x%08x (MsgID 0x%04x, Service 0x%02x, TxID %d)",
+				c.logf(ClientLogLevelDebug, "QMI: received response with unmatched key 0x%08x (MsgID 0x%04x, Service 0x%02x, TxID %d)",
 					key, packet.MessageID, packet.ServiceType, packet.TransactionID)
 			}
 			c.dispatchIndication(packet)
@@ -577,7 +597,7 @@ func (c *Client) enqueueIndication(event Event) {
 	case <-c.closeCh:
 	case <-timer.C:
 		c.droppedEdgeIndications.Add(1)
-		log.Printf("QMI: dropping edge indication type=%d service=0x%02x msg=0x%04x because indication queue is full",
+		c.logf(ClientLogLevelWarn, "QMI: dropping edge indication type=%d service=0x%02x msg=0x%04x because indication queue is full",
 			event.Type, event.ServiceID, event.MessageID)
 	}
 }
@@ -624,6 +644,8 @@ func (c *Client) coalescingKey(event Event) (string, bool) {
 		return fmt.Sprintf("nas-network-reject:%d:%d", event.ServiceID, event.MessageID), true
 	case EventNASIncrementalNetworkScan:
 		return fmt.Sprintf("nas-incremental-scan:%d:%d", event.ServiceID, event.MessageID), true
+	case EventNASEventReport:
+		return fmt.Sprintf("nas-event-report:%d:%d", event.ServiceID, event.MessageID), true
 	case EventWMSTransportNetworkRegistrationStatus:
 		return fmt.Sprintf("wms-transport:%d:%d", event.ServiceID, event.MessageID), true
 	case EventModemReset:
@@ -645,8 +667,10 @@ func (c *Client) dispatchIndication(p *Packet) {
 		eventType = EventModemReset
 	case (p.ServiceType == ServiceWDS || p.ServiceType == ServiceWDSIPv6) && p.MessageID == WDSGetPktSrvcStatusInd:
 		eventType = EventPacketServiceStatusChanged
-	case p.ServiceType == ServiceNAS && (p.MessageID == NASServingSystemInd || p.MessageID == NASSysInfoInd || p.MessageID == NASEventReportInd):
+	case p.ServiceType == ServiceNAS && (p.MessageID == NASServingSystemInd || p.MessageID == NASSysInfoInd):
 		eventType = EventServingSystemChanged
+	case p.ServiceType == ServiceNAS && p.MessageID == NASEventReportInd:
+		eventType = EventNASEventReport
 	case p.ServiceType == ServiceNAS && p.MessageID == NASOperatorNameInd:
 		eventType = EventNASOperatorNameChanged
 	case p.ServiceType == ServiceNAS && p.MessageID == NASNetworkTimeInd:

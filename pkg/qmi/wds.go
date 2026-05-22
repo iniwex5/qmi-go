@@ -262,7 +262,11 @@ type CurrentBearerTechnologyInfo struct {
 
 // NewWDSService creates a WDS service wrapper / NewWDSService创建一个WDS服务包装器
 func NewWDSService(client *Client) (*WDSService, error) {
-	clientID, err := client.AllocateClientID(ServiceWDS)
+	return NewWDSServiceWithContext(context.Background(), client)
+}
+
+func NewWDSServiceWithContext(ctx context.Context, client *Client) (*WDSService, error) {
+	clientID, err := client.AllocateClientIDWithContext(ctx, ServiceWDS)
 	if err != nil {
 		return nil, err
 	}

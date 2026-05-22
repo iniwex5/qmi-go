@@ -3,6 +3,7 @@ package manager
 import (
 	"net"
 	"sync"
+	"sync/atomic"
 
 	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
 )
@@ -46,6 +47,7 @@ const (
 	EventUIMSessionClosed                                       // UIM session closed indication / UIM 会话关闭指示
 	EventUIMRefresh                                             // UIM refresh indication / UIM 刷新指示
 	EventUIMSlotStatus                                          // UIM slot status indication / UIM 卡槽状态指示
+	EventNASEventReport                                         // NAS event report / NAS 事件报告
 	EventUnknownIndication                                      // Unknown indication / 未知指示
 )
 
@@ -101,6 +103,8 @@ func (e EventType) String() string {
 		return "NASNetworkReject"
 	case EventNASIncrementalNetworkScan:
 		return "NASIncrementalNetworkScan"
+	case EventNASEventReport:
+		return "NASEventReport"
 	case EventModemReset:
 		return "ModemReset"
 	case EventSimStatusChanged:
@@ -128,6 +132,9 @@ type Event struct {
 	SMSIndex                 uint32                                   // SMS index (for NewSMS) / 短信索引
 	StorageType              uint8                                    // SMS storage type (for NewSMS) / 短信存储类型
 	Pdu                      []byte                                   // SMS Raw Data PDU (for EventNewSMSRaw) / 短信原始 PDU 数据
+	SMSAckRequired           bool                                     // Raw SMS requires WMS ack / 原始短信需要 WMS ACK
+	SMSTransactionID         uint32                                   // Raw SMS transaction ID for WMS ack / 原始短信 ACK 事务 ID
+	SMSFormat                uint8                                    // Raw SMS format / 原始短信格式
 	IMSRegistration          *qmi.IMSARegistrationStatus              // IMS registration status / IMS 注册状态
 	IMSServices              *qmi.IMSAServicesStatus                  // IMS services status / IMS 业务状态
 	IMSSettings              *qmi.IMSServicesEnabledSettings          // IMS enabled settings / IMS 配置状态
@@ -157,9 +164,12 @@ type EventHandler func(event Event)
 
 // EventEmitter manages event handlers / EventEmitter 管理事件处理器
 type EventEmitter struct {
-	mu       sync.RWMutex
-	handlers []EventHandler
-	queue    chan Event
+	mu        sync.RWMutex
+	handlers  []EventHandler
+	queue     chan Event
+	done      chan struct{}
+	closeOnce sync.Once
+	dropped   atomic.Uint64
 }
 
 // NewEventEmitter creates a new event emitter / NewEventEmitter 创建新的事件发射器
@@ -174,6 +184,7 @@ func NewEventEmitterWithQueueSize(size int) *EventEmitter {
 	e := &EventEmitter{
 		handlers: make([]EventHandler, 0),
 		queue:    make(chan Event, size),
+		done:     make(chan struct{}),
 	}
 	go e.loop()
 	return e
@@ -463,21 +474,26 @@ func cloneEvent(event Event) Event {
 }
 
 func (e *EventEmitter) loop() {
-	for event := range e.queue {
-		e.mu.RLock()
-		handlers := make([]EventHandler, len(e.handlers))
-		copy(handlers, e.handlers)
-		e.mu.RUnlock()
+	for {
+		select {
+		case <-e.done:
+			return
+		case event := <-e.queue:
+			e.mu.RLock()
+			handlers := make([]EventHandler, len(e.handlers))
+			copy(handlers, e.handlers)
+			e.mu.RUnlock()
 
-		for _, handler := range handlers {
-			func(h EventHandler) {
-				defer func() {
-					if recover() != nil {
-						// Keep the emitter alive even if a callback panics.
-					}
-				}()
-				h(cloneEvent(event))
-			}(handler)
+			for _, handler := range handlers {
+				func(h EventHandler) {
+					defer func() {
+						if recover() != nil {
+							// Keep the emitter alive even if a callback panics.
+						}
+					}()
+					h(cloneEvent(event))
+				}(handler)
+			}
 		}
 	}
 }
@@ -490,11 +506,42 @@ func (e *EventEmitter) On(handler EventHandler) {
 }
 
 // Emit sends an event to all handlers / Emit 向所有处理器发送事件
-func (e *EventEmitter) Emit(event Event) {
+func (e *EventEmitter) Emit(event Event) bool {
 	if e == nil {
+		return false
+	}
+	select {
+	case <-e.done:
+		e.dropped.Add(1)
+		return false
+	default:
+	}
+	select {
+	case <-e.done:
+		e.dropped.Add(1)
+		return false
+	case e.queue <- event:
+		return true
+	default:
+		e.dropped.Add(1)
+		return false
+	}
+}
+
+func (e *EventEmitter) Close() {
+	if e == nil || e.done == nil {
 		return
 	}
-	e.queue <- event
+	e.closeOnce.Do(func() {
+		close(e.done)
+	})
+}
+
+func (e *EventEmitter) Dropped() uint64 {
+	if e == nil {
+		return 0
+	}
+	return e.dropped.Load()
 }
 
 // Clear removes all handlers / Clear 移除所有处理器

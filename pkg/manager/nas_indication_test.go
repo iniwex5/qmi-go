@@ -82,6 +82,91 @@ func TestHandleIndicationNASOperatorNameChanged(t *testing.T) {
 	}
 }
 
+func TestHandleIndicationSuppressesEmptyNASEventReport(t *testing.T) {
+	m := &Manager{
+		log:     NewNopLogger(),
+		events:  NewEventEmitterWithQueueSize(1),
+		eventCh: make(chan internalEvent, 1),
+	}
+
+	m.handleIndication(qmi.Event{
+		Type:      qmi.EventNASEventReport,
+		ServiceID: qmi.ServiceNAS,
+		MessageID: qmi.NASEventReportInd,
+		Packet: &qmi.Packet{
+			ServiceType: qmi.ServiceNAS,
+			MessageID:   qmi.NASEventReportInd,
+			TLVs:        nil,
+		},
+	})
+
+	select {
+	case evt := <-m.eventCh:
+		t.Fatalf("unexpected internal event for empty NAS EventReport: %v", evt)
+	default:
+	}
+}
+
+func TestHandleIndicationEmitsNonEmptyNASEventReport(t *testing.T) {
+	m := &Manager{
+		log:     NewNopLogger(),
+		events:  NewEventEmitterWithQueueSize(2),
+		eventCh: make(chan internalEvent, 1),
+	}
+	ch := make(chan Event, 1)
+	m.OnEvent(func(evt Event) {
+		ch <- evt
+	})
+
+	m.handleIndication(qmi.Event{
+		Type:      qmi.EventNASEventReport,
+		ServiceID: qmi.ServiceNAS,
+		MessageID: qmi.NASEventReportInd,
+		Packet: &qmi.Packet{
+			ServiceType: qmi.ServiceNAS,
+			MessageID:   qmi.NASEventReportInd,
+			TLVs: []qmi.TLV{
+				{Type: 0x10, Value: []byte{0x01}},
+			},
+		},
+	})
+
+	got := waitManagerEvent(t, ch)
+	if got.Type != EventNASEventReport {
+		t.Fatalf("event type=%v want EventNASEventReport", got.Type)
+	}
+	if len(got.TLVMeta) != 1 || got.TLVMeta[0].Type != 0x10 {
+		t.Fatalf("unexpected TLV meta: %+v", got.TLVMeta)
+	}
+}
+
+func TestHandleIndicationNASEventReportDoesNotScheduleTargetedCheck(t *testing.T) {
+	m := &Manager{
+		log:     NewNopLogger(),
+		events:  NewEventEmitterWithQueueSize(2),
+		eventCh: make(chan internalEvent, 1),
+	}
+
+	m.handleIndication(qmi.Event{
+		Type:      qmi.EventNASEventReport,
+		ServiceID: qmi.ServiceNAS,
+		MessageID: qmi.NASEventReportInd,
+		Packet: &qmi.Packet{
+			ServiceType: qmi.ServiceNAS,
+			MessageID:   qmi.NASEventReportInd,
+			TLVs: []qmi.TLV{
+				{Type: 0x10, Value: []byte{0x01}},
+			},
+		},
+	})
+
+	select {
+	case evt := <-m.eventCh:
+		t.Fatalf("NAS EventReport scheduled internal event %v, want none", evt)
+	default:
+	}
+}
+
 func TestHandleIndicationNASNetworkTimeChanged(t *testing.T) {
 	m := &Manager{
 		log:     NewNopLogger(),

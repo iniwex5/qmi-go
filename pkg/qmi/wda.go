@@ -38,7 +38,11 @@ type WDAService struct {
 
 // NewWDAService creates a new WDA client / NewWDAService创建一个新的WDA客户端
 func NewWDAService(client *Client) (*WDAService, error) {
-	clientID, err := client.AllocateClientID(ServiceWDA)
+	return NewWDAServiceWithContext(context.Background(), client)
+}
+
+func NewWDAServiceWithContext(ctx context.Context, client *Client) (*WDAService, error) {
+	clientID, err := client.AllocateClientIDWithContext(ctx, ServiceWDA)
 	if err != nil {
 		return nil, err
 	}

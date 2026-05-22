@@ -24,7 +24,11 @@ type rawReadMessageValue struct {
 
 // NewWMSService creates a WMS service wrapper / NewWMSService 创建 WMS 服务封装
 func NewWMSService(client *Client) (*WMSService, error) {
-	clientID, err := client.AllocateClientID(ServiceWMS)
+	return NewWMSServiceWithContext(context.Background(), client)
+}
+
+func NewWMSServiceWithContext(ctx context.Context, client *Client) (*WMSService, error) {
+	clientID, err := client.AllocateClientIDWithContext(ctx, ServiceWMS)
 	if err != nil {
 		return nil, err
 	}

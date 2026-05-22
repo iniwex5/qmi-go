@@ -53,6 +53,14 @@ func (s State) String() string {
 // Configuration / 配置
 // ============================================================================
 
+type DataPlanePolicy int
+
+const (
+	DataPlanePolicyEager DataPlanePolicy = iota
+	DataPlanePolicyLazy
+	DataPlanePolicyDisabled
+)
+
 type Config struct {
 	Device          ModemDevice // Modem device info / Modem 设备信息
 	APN             string      // APN (Access Point Name) / APN（接入点名称）
@@ -73,11 +81,12 @@ type Config struct {
 	MuxID        uint8 // QMAP Mux ID (对应 -m 参数, 默认 0 表示不启用多路复用)
 	NoDial       bool  // Only open QMI services, don't perform WDS dialing / 仅打开 QMI 服务, 不进行 WDS 拨号
 
-	Timeouts      TimeoutConfig
-	RetryPolicy   RetryPolicy
-	HealthPolicy  HealthPolicy
-	EventPolicy   EventPolicy
-	ClientOptions qmi.ClientOptions
+	DataPlanePolicy DataPlanePolicy // Data-plane service allocation policy / 数据面服务分配策略
+	Timeouts        TimeoutConfig
+	RetryPolicy     RetryPolicy
+	HealthPolicy    HealthPolicy
+	EventPolicy     EventPolicy
+	ClientOptions   qmi.ClientOptions
 }
 
 type TimeoutConfig struct {
@@ -243,6 +252,14 @@ type Manager struct {
 	openLogicalChannelHook            func(ctx context.Context, slot uint8, aid []byte) (byte, error)
 	closeLogicalChannelHook           func(ctx context.Context, slot uint8, channel uint8) error
 	sendAPDUHook                      func(ctx context.Context, slot uint8, channel uint8, command []byte) ([]byte, error)
+	newWDSService                     func(ctx context.Context, client *qmi.Client) (*qmi.WDSService, error)
+	newNASService                     func(ctx context.Context, client *qmi.Client) (*qmi.NASService, error)
+	newDMSService                     func(ctx context.Context, client *qmi.Client) (*qmi.DMSService, error)
+	newUIMService                     func(ctx context.Context, client *qmi.Client) (*qmi.UIMService, error)
+	newWDAService                     func(ctx context.Context, client *qmi.Client) (*qmi.WDAService, error)
+	newWMSService                     func(ctx context.Context, client *qmi.Client) (*qmi.WMSService, error)
+	newVOICEService                   func(ctx context.Context, client *qmi.Client) (*qmi.VOICEService, error)
+	enableRawIPHook                   func(ctx context.Context) error
 	onWMSRebindReplayHook             func(reason string)
 	openClientAndAllocateServicesHook func() error
 	checkSIMHook                      func() error
@@ -412,10 +429,24 @@ func New(cfg Config, logger Logger) *Manager {
 	if logger == nil {
 		logger = NewNopLogger()
 	}
+	baseLog := logger.WithField("iface", cfg.Device.NetInterface)
+	if cfg.ClientOptions.Logf == nil {
+		clientLog := baseLog.WithField("component", "qmi_client")
+		cfg.ClientOptions.Logf = func(level qmi.ClientLogLevel, format string, args ...any) {
+			switch level {
+			case qmi.ClientLogLevelWarn:
+				clientLog.Warnf(format, args...)
+			case qmi.ClientLogLevelError:
+				clientLog.Errorf(format, args...)
+			default:
+				clientLog.Debugf(format, args...)
+			}
+		}
+	}
 
 	return &Manager{
 		cfg:                   cfg,
-		log:                   logger.WithField("iface", cfg.Device.NetInterface),
+		log:                   baseLog,
 		retryDelays:           append([]time.Duration(nil), cfg.RetryPolicy.ReconnectDelays...),
 		reinitDelays:          append([]time.Duration(nil), cfg.RetryPolicy.ReinitDelays...),
 		eventCh:               make(chan internalEvent, 16),
@@ -517,6 +548,9 @@ func (m *Manager) Stop() error {
 	m.wg.Wait()
 
 	m.cleanup()
+	if m.events != nil {
+		m.events.Close()
+	}
 	m.setState(StateDisconnected)
 	m.log.Info("Connection manager stopped")
 	return nil
@@ -816,6 +850,124 @@ func maxDuration(a, b time.Duration) time.Duration {
 		return a
 	}
 	return b
+}
+
+func (m *Manager) createWDSService(ctx context.Context) (*qmi.WDSService, error) {
+	if m.newWDSService != nil {
+		return m.newWDSService(ctx, m.client)
+	}
+	return qmi.NewWDSServiceWithContext(ctx, m.client)
+}
+
+func (m *Manager) createNASService(ctx context.Context) (*qmi.NASService, error) {
+	if m.newNASService != nil {
+		return m.newNASService(ctx, m.client)
+	}
+	return qmi.NewNASServiceWithContext(ctx, m.client)
+}
+
+func (m *Manager) createDMSService(ctx context.Context) (*qmi.DMSService, error) {
+	if m.newDMSService != nil {
+		return m.newDMSService(ctx, m.client)
+	}
+	return qmi.NewDMSServiceWithContext(ctx, m.client)
+}
+
+func (m *Manager) createUIMService(ctx context.Context) (*qmi.UIMService, error) {
+	if m.newUIMService != nil {
+		return m.newUIMService(ctx, m.client)
+	}
+	return qmi.NewUIMServiceWithContext(ctx, m.client)
+}
+
+func (m *Manager) createWDAService(ctx context.Context) (*qmi.WDAService, error) {
+	if m.newWDAService != nil {
+		return m.newWDAService(ctx, m.client)
+	}
+	return qmi.NewWDAServiceWithContext(ctx, m.client)
+}
+
+func (m *Manager) createWMSService(ctx context.Context) (*qmi.WMSService, error) {
+	if m.newWMSService != nil {
+		return m.newWMSService(ctx, m.client)
+	}
+	return qmi.NewWMSServiceWithContext(ctx, m.client)
+}
+
+func (m *Manager) createVOICEService(ctx context.Context) (*qmi.VOICEService, error) {
+	if m.newVOICEService != nil {
+		return m.newVOICEService(ctx, m.client)
+	}
+	return qmi.NewVOICEServiceWithContext(ctx, m.client)
+}
+
+func (m *Manager) shouldAllocateWDA() bool {
+	return strings.TrimSpace(m.cfg.Device.NetInterface) != "" && (m.cfg.EnableIPv4 || m.cfg.EnableIPv6)
+}
+
+func (m *Manager) shouldAllocateDataPlaneAtStart() bool {
+	return m.cfg.DataPlanePolicy == DataPlanePolicyEager
+}
+
+func (m *Manager) dataPlaneDisabled() bool {
+	return m.cfg.DataPlanePolicy == DataPlanePolicyDisabled
+}
+
+func (m *Manager) ensureDataPlaneServices(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if m.dataPlaneDisabled() {
+		return ErrServiceNotReady("data-plane")
+	}
+
+	var err error
+	if m.cfg.EnableIPv4 && m.wds == nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		m.log.Debug("Allocating WDS client for IPv4...")
+		m.wds, err = m.createWDSService(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to allocate WDS client: %w", err)
+		}
+		m.log.Debug("Allocated WDS client for IPv4")
+	}
+
+	if m.cfg.EnableIPv6 && m.wdsV6 == nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		m.log.Debug("Allocating WDS client for IPv6...")
+		m.wdsV6, err = m.createWDSService(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to allocate IPv6 WDS client: %w", err)
+		}
+		m.log.Debug("Allocated WDS client for IPv6")
+	}
+
+	if m.shouldAllocateWDA() && m.wda == nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		m.log.Debug("Allocating WDA client...")
+		m.wda, err = m.createWDAService(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to allocate WDA client: %w", err)
+		}
+		m.log.Debug("Allocated WDA client")
+
+		if err := m.enableRawIP(ctx); err != nil {
+			if ctx.Err() != nil {
+				return fmt.Errorf("failed to enable RawIP mode: %w", ctx.Err())
+			}
+			m.log.WithError(err).Warn("Failed to enable RawIP mode, falling back to 802.3")
+		}
+	} else if !m.shouldAllocateWDA() {
+		m.log.Debug("Skipping WDA client allocation")
+	}
+
+	return nil
 }
 
 func contextWithMaxTimeout(ctx context.Context, limit time.Duration) (context.Context, context.CancelFunc) {
@@ -1231,18 +1383,22 @@ func (m *Manager) refreshWMSState(ctx context.Context, opts wmsRefreshOptions) {
 }
 
 func (m *Manager) recoverWMSState() {
+	m.recoverWMSStateWithContext(context.Background())
+}
+
+func (m *Manager) recoverWMSStateWithContext(parent context.Context) {
 	if !m.hasWMSReadyPath() {
 		return
 	}
 
 	if !m.cfg.DisableWMSInd {
-		ctx, cancel := m.opContext(m.cfg.Timeouts.IndicationRegister)
+		ctx, cancel := contextWithMaxTimeout(parent, m.cfg.Timeouts.IndicationRegister)
 		if err := m.registerWMSEventReportWithContext(ctx); err != nil {
 			m.log.WithError(err).Warn("Failed to register SMS indications")
 		}
 		cancel()
 
-		ctx, cancel = m.opContext(m.cfg.Timeouts.IndicationRegister)
+		ctx, cancel = contextWithMaxTimeout(parent, m.cfg.Timeouts.IndicationRegister)
 		if err := m.registerWMSIndicationsWithContext(ctx, true); err != nil {
 			if isUnsupportedOptionalWMSIndicationError(err) {
 				m.log.WithError(err).Debug("WMS transport registration indications not supported by modem")
@@ -1255,7 +1411,7 @@ func (m *Manager) recoverWMSState() {
 		m.log.Debug("WMS indications disabled by config")
 	}
 
-	ctx, cancel := m.opContext(maxDuration(m.cfg.Timeouts.IndicationRegister, m.cfg.Timeouts.StatusCheck))
+	ctx, cancel := contextWithMaxTimeout(parent, maxDuration(m.cfg.Timeouts.IndicationRegister, m.cfg.Timeouts.StatusCheck))
 	defer cancel()
 	m.refreshWMSState(ctx, wmsRefreshOptions{
 		includeRoutes:    true,
@@ -1842,40 +1998,36 @@ func (m *Manager) setState(s State) {
 	}
 }
 
-func (m *Manager) allocateServices() error {
+func (m *Manager) allocateServices(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var err error
 
-	// WDS for IPv4 / IPv4的WDS服务
-	if m.cfg.EnableIPv4 {
-		m.log.Debug("Allocating WDS client for IPv4...")
-		m.wds, err = qmi.NewWDSService(m.client)
-		if err != nil {
-			return fmt.Errorf("failed to allocate WDS client: %w", err)
+	if m.shouldAllocateDataPlaneAtStart() {
+		if err := m.ensureDataPlaneServices(ctx); err != nil {
+			return err
 		}
-		m.log.Debug("Allocated WDS client for IPv4")
-	}
-
-	// WDS for IPv6 (needs separate client) / IPv6的WDS服务 (需要单独的客户端)
-	if m.cfg.EnableIPv6 {
-		m.log.Debug("Allocating WDS client for IPv6...")
-		m.wdsV6, err = qmi.NewWDSService(m.client)
-		if err != nil {
-			m.log.WithError(err).Warn("Failed to allocate IPv6 WDS client")
-		} else {
-			m.log.Debug("Allocated WDS client for IPv6")
-		}
+	} else {
+		m.log.Debug("Skipping data-plane service allocation at startup")
 	}
 
 	// NAS
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	m.log.Debug("Allocating NAS client...")
-	m.nas, err = qmi.NewNASService(m.client)
+	m.nas, err = m.createNASService(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("failed to allocate NAS client: %w", ctx.Err())
+		}
 		m.log.WithError(err).Warn("Failed to allocate NAS client")
 	} else {
 		m.log.Debug("Allocated NAS client")
-		ctx, cancel := m.opContext(m.cfg.Timeouts.IndicationRegister)
+		indCtx, cancel := contextWithMaxTimeout(ctx, m.cfg.Timeouts.IndicationRegister)
 		if err := m.withNASRecovery("allocateServices.NASRegisterIndications", func(nas *qmi.NASService) error {
-			return nas.RegisterIndicationsWithConfig(ctx, qmi.NASIndicationRegistration{
+			return nas.RegisterIndicationsWithConfig(indCtx, qmi.NASIndicationRegistration{
 				ServingSystemChanged:        true,
 				SystemInfo:                  true,
 				NetworkTime:                 true,
@@ -1886,73 +2038,98 @@ func (m *Manager) allocateServices() error {
 				EventReportSignalThresholds: []int8{-60, -85},
 			})
 		}); err != nil {
+			if ctx.Err() != nil {
+				cancel()
+				return fmt.Errorf("failed to register NAS indications: %w", ctx.Err())
+			}
 			m.log.WithError(err).Warn("Failed to register NAS indications")
 		}
 		cancel()
 	}
 
 	// DMS
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	m.log.Debug("Allocating DMS client...")
-	m.dms, err = qmi.NewDMSService(m.client)
+	m.dms, err = m.createDMSService(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("failed to allocate DMS client: %w", ctx.Err())
+		}
 		m.log.WithError(err).Warn("Failed to allocate DMS client")
 	} else {
 		m.log.Debug("Allocated DMS client")
 	}
 
 	// UIM
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	m.log.Debug("Allocating UIM client...")
-	m.uim, err = qmi.NewUIMService(m.client)
+	m.uim, err = m.createUIMService(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("failed to allocate UIM client: %w", ctx.Err())
+		}
 		m.log.WithError(err).Warn("Failed to allocate UIM client")
 	} else {
 		m.log.Debug("Allocated UIM client")
-		ctx, cancel := m.opContext(m.cfg.Timeouts.IndicationRegister)
-		acceptedMask, registerErr := m.registerUIMIndicationsWithContext(ctx, m.uim)
+		indCtx, cancel := contextWithMaxTimeout(ctx, m.cfg.Timeouts.IndicationRegister)
+		acceptedMask, registerErr := m.registerUIMIndicationsWithContext(indCtx, m.uim)
 		cancel()
 		if registerErr != nil {
+			if ctx.Err() != nil {
+				return fmt.Errorf("failed to register UIM indications: %w", ctx.Err())
+			}
 			m.log.WithError(registerErr).Warn("Failed to register UIM indications")
 		} else {
 			m.log.WithField("requested_mask", m.uimIndicationRegistrationMask()).WithField("accepted_mask", acceptedMask).Info("UIM indications registered")
 		}
 	}
 
-	// WDA (Backup/Optional) / WDA服务 (备份/可选)
-	m.log.Debug("Allocating WDA client...")
-	m.wda, err = qmi.NewWDAService(m.client)
-	if err != nil {
-		m.log.WithError(err).Warn("Failed to allocate WDA client")
+	// WMS (SMS)
+	if m.cfg.DisableWMSInd {
+		m.log.Debug("Skipping WMS client allocation")
 	} else {
-		m.log.Debug("Allocated WDA client")
-
-		// 尝试启用 RawIP 模式 (Modern 4G/5G modems usually require this)
-		if err := m.enableRawIP(); err != nil {
-			m.log.WithError(err).Warn("Failed to enable RawIP mode, falling back to 802.3")
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		m.log.Debug("Allocating WMS client...")
+		m.wms, err = m.createWMSService(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return fmt.Errorf("failed to allocate WMS client: %w", ctx.Err())
+			}
+			m.log.WithError(err).Warn("Failed to allocate WMS client")
+		} else {
+			m.log.Debug("Allocated WMS client")
+			m.recoverWMSStateWithContext(ctx)
 		}
 	}
 
-	// WMS (SMS)
-	m.log.Debug("Allocating WMS client...")
-	m.wms, err = qmi.NewWMSService(m.client)
-	if err != nil {
-		m.log.WithError(err).Warn("Failed to allocate WMS client")
-	} else {
-		m.log.Debug("Allocated WMS client")
-		m.recoverWMSState()
-	}
-
 	// VOICE
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	m.log.Debug("Allocating VOICE client...")
-	m.voice, err = qmi.NewVOICEService(m.client)
+	m.voice, err = m.createVOICEService(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("failed to allocate VOICE client: %w", ctx.Err())
+		}
 		m.log.WithError(err).Warn("Failed to allocate VOICE client")
 	} else {
 		m.log.Debug("Allocated VOICE client")
 		if cfg, ok := m.voiceIndicationRegistration(); ok {
-			ctx, cancel := m.opContext(m.cfg.Timeouts.IndicationRegister)
+			indCtx, cancel := contextWithMaxTimeout(ctx, m.cfg.Timeouts.IndicationRegister)
 			if err := m.withVOICERecovery("allocateServices.VOICEIndicationRegister", func(voice *qmi.VOICEService) error {
-				return voice.IndicationRegister(ctx, cfg)
+				return voice.IndicationRegister(indCtx, cfg)
 			}); err != nil {
+				if ctx.Err() != nil {
+					cancel()
+					return fmt.Errorf("failed to register VOICE indications: %w", ctx.Err())
+				}
 				m.log.WithError(err).Warn("Failed to register VOICE indications")
 			}
 			cancel()
@@ -1994,7 +2171,10 @@ func (m *Manager) voiceIndicationRegistration() (qmi.VoiceIndicationRegistration
 }
 
 // enableRawIP enables RawIP mode on both the modem (WDA) and the kernel interface / 启用RawIP模式：同时在Modem(WDA)和内核接口上启用
-func (m *Manager) enableRawIP() error {
+func (m *Manager) enableRawIP(parent context.Context) error {
+	if m.enableRawIPHook != nil {
+		return m.enableRawIPHook(parent)
+	}
 	if m.wda == nil {
 		return fmt.Errorf("WDA service not available")
 	}
@@ -2030,7 +2210,7 @@ func (m *Manager) enableRawIP() error {
 
 	// Optimization: Check if already enabled in Modem (if WDA available) / 优化：检查Modem中是否已启用 (如果WDA可用)
 	modemEnabled := false
-	ctx, cancel := m.opContext(m.cfg.Timeouts.StatusCheck)
+	ctx, cancel := contextWithMaxTimeout(parent, m.cfg.Timeouts.StatusCheck)
 	defer cancel()
 	if currentFormat, err := m.wda.GetDataFormat(ctx); err == nil {
 		if currentFormat.LinkProtocol == qmi.LinkProtocolIP {
@@ -2052,7 +2232,7 @@ func (m *Manager) enableRawIP() error {
 		UlDataAggregation: uint32(qmi.DataFormatUlDataAggDisabled),
 		DlDataAggregation: uint32(qmi.DataFormatDlDataAggDisabled),
 	}
-	ctx, cancel = m.opContext(m.cfg.Timeouts.StatusCheck)
+	ctx, cancel = contextWithMaxTimeout(parent, m.cfg.Timeouts.StatusCheck)
 	defer cancel()
 	if err := m.wda.SetDataFormat(ctx, format); err != nil {
 		m.log.WithError(err).Warn("Failed to set modem data format to Raw IP (might already be set or not supported), continuing to force kernel...")
@@ -2195,35 +2375,52 @@ func (m *Manager) cleanup() {
 	m.wmsReadinessRefreshPending = false
 	m.mu.Unlock()
 
-	// 清理 QMAP 虚拟网卡
+	cleanupTasks := make([]cleanupTask, 0, 4)
+
 	if muxIface != "" && muxID > 0 {
-		go func() {
-			netcfg.FlushAddresses(muxIface)
-			netcfg.BringDown(muxIface)
-			netcfg.DelQMAPMux(masterIface, muxID)
-		}()
+		cleanupTasks = append(cleanupTasks, cleanupTask{
+			name: "qmap",
+			run: func(context.Context) error {
+				return errors.Join(
+					netcfg.FlushAddresses(muxIface),
+					netcfg.BringDown(muxIface),
+					netcfg.DelQMAPMux(masterIface, muxID),
+				)
+			},
+		})
 	}
 
 	// Disconnect data call with timeout / 带超时断开数据呼叫
 	if handleV4 != 0 && wds != nil {
-		go func() {
-			wds.StopNetworkInterface(cleanupCtx, handleV4)
-		}()
+		cleanupTasks = append(cleanupTasks, cleanupTask{
+			name: "stop-wds-v4",
+			run: func(ctx context.Context) error {
+				return wds.StopNetworkInterface(ctx, handleV4)
+			},
+		})
 	}
 	if handleV6 != 0 && wdsV6 != nil {
-		go func() {
-			wdsV6.StopNetworkInterface(cleanupCtx, handleV6)
-		}()
+		cleanupTasks = append(cleanupTasks, cleanupTask{
+			name: "stop-wds-v6",
+			run: func(ctx context.Context) error {
+				return wdsV6.StopNetworkInterface(ctx, handleV6)
+			},
+		})
 	}
 
-	// Flush network config (non-blocking, ignore errors) / 清除网络配置 (非阻塞，忽略错误)
-	go func() {
-		netcfg.FlushAddresses(ifname)
-		netcfg.BringDown(ifname)
-	}()
+	if ifname != "" {
+		cleanupTasks = append(cleanupTasks, cleanupTask{
+			name: "netcfg",
+			run: func(context.Context) error {
+				return errors.Join(
+					netcfg.FlushAddresses(ifname),
+					netcfg.BringDown(ifname),
+				)
+			},
+		})
+	}
 
-	// Wait a bit for async cleanup, but don't block / 等待异步清理，但不阻塞
-	time.Sleep(100 * time.Millisecond)
+	runCleanupTasks(cleanupCtx, m.log, cleanupTasks)
 
 	// Release clients / 释放客户端
 	if wds != nil {
@@ -2263,6 +2460,68 @@ func (m *Manager) cleanup() {
 	if client != nil {
 		client.Close()
 	}
+}
+
+type cleanupTask struct {
+	name string
+	run  func(context.Context) error
+}
+
+type cleanupTaskResult struct {
+	name string
+	err  error
+}
+
+func runCleanupTasks(ctx context.Context, log Logger, tasks []cleanupTask) []cleanupTaskResult {
+	if len(tasks) == 0 {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if log == nil {
+		log = NewNopLogger()
+	}
+
+	resultCh := make(chan cleanupTaskResult, len(tasks))
+	pending := make(map[string]struct{}, len(tasks))
+	for i, task := range tasks {
+		if task.name == "" {
+			task.name = fmt.Sprintf("task-%d", i)
+		}
+		pending[task.name] = struct{}{}
+		go func(task cleanupTask) {
+			if task.run == nil {
+				resultCh <- cleanupTaskResult{name: task.name}
+				return
+			}
+			resultCh <- cleanupTaskResult{name: task.name, err: task.run(ctx)}
+		}(task)
+	}
+
+	results := make([]cleanupTaskResult, 0, len(tasks))
+	for len(pending) > 0 {
+		select {
+		case result := <-resultCh:
+			if _, ok := pending[result.name]; !ok {
+				continue
+			}
+			delete(pending, result.name)
+			results = append(results, result)
+			if result.err != nil && !errors.Is(result.err, context.Canceled) {
+				log.Warnf("Cleanup task %s failed: %v", result.name, result.err)
+			}
+		case <-ctx.Done():
+			err := ctx.Err()
+			for name := range pending {
+				result := cleanupTaskResult{name: name, err: err}
+				results = append(results, result)
+				log.Warnf("Cleanup task %s timed out: %v", name, err)
+			}
+			return results
+		}
+	}
+	return results
 }
 
 // ============================================================================
@@ -2366,15 +2625,16 @@ func (m *Manager) openClientAndAllocateServices() error {
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		initCtx, cancel := m.opContext(m.cfg.Timeouts.Init)
 		client, err := qmi.NewClientWithOptions(initCtx, m.cfg.Device.ControlPath, m.cfg.ClientOptions)
-		cancel()
 		if err != nil {
+			cancel()
 			lastErr = fmt.Errorf("failed to open QMI device: %w", err)
 		} else {
 			m.mu.Lock()
 			m.client = client
 			m.mu.Unlock()
 
-			err = m.allocateServices()
+			err = m.allocateServices(initCtx)
+			cancel()
 			if err == nil {
 				return nil
 			}
@@ -2630,6 +2890,14 @@ func (m *Manager) doConnect() error {
 	m.state = StateConnecting
 	m.mu.Unlock()
 
+	dialCtx, cancelDial := m.opContext(m.cfg.Timeouts.Dial)
+	defer cancelDial()
+
+	if err := m.ensureDataPlaneServices(dialCtx); err != nil {
+		m.handleDialFailure(err)
+		return err
+	}
+
 	if m.wds == nil && m.wdsV6 == nil {
 		err := fmt.Errorf("wds service not available")
 		m.log.Error("WDS service not available")
@@ -2700,9 +2968,6 @@ func (m *Manager) doConnect() error {
 		}
 		m.log.Infof("使用 Profile Index=%d", m.cfg.ProfileIndex)
 	}
-
-	dialCtx, cancelDial := m.opContext(m.cfg.Timeouts.Dial)
-	defer cancelDial()
 
 	// Log current signal and registration for context / 记录当前信号和注册状态以便调试
 	if sig, err := m.getSignalStrength(dialCtx); err == nil {
@@ -3125,7 +3390,9 @@ func (m *Manager) indicationHandler() {
 }
 
 func (m *Manager) handleIndication(evt qmi.Event) {
-	m.log.Debugf("Indication: type=%d service=0x%02x msg=0x%04x", evt.Type, evt.ServiceID, evt.MessageID)
+	if shouldLogRawIndication(evt) {
+		m.log.Debugf("Indication: type=%d service=0x%02x msg=0x%04x", evt.Type, evt.ServiceID, evt.MessageID)
+	}
 
 	switch evt.Type {
 	case qmi.EventPacketServiceStatusChanged:
@@ -3276,6 +3543,14 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 		}
 		m.emitEvent(event)
 
+	case qmi.EventNASEventReport:
+		if isEmptyNASEventReport(evt) {
+			return
+		}
+		event := m.qmiIndicationEvent(EventNASEventReport, evt)
+		event.TLVMeta = packetTLVMeta(evt.Packet)
+		m.emitEvent(event)
+
 	case qmi.EventModemReset:
 		m.emitQMIIndicationEvent(EventModemReset, evt)
 		m.enqueueModemResetEvent("qmi_indication")
@@ -3298,17 +3573,23 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 		} else if tlv := qmi.FindTLV(evt.Packet.TLVs, 0x11); tlv != nil && len(tlv.Value) >= 6 {
 			// 0x11 = Transfer Route MT Message: AckIndicator(1) + TransactionID(4) + Format(1) + RawData(...)
 			// 0x11 = 传输路由 MT 消息: Ack(1) + 事务ID(4) + 格式(1) + 原始数据(...)
+			ackRequired := tlv.Value[0] != 0
+			transactionID := binary.LittleEndian.Uint32(tlv.Value[1:5])
+			format := tlv.Value[5]
 			pdu := tlv.Value[6:]
 			// Copy PDU to prevent underlying buffer corruption / 拷贝 PDU 防止底层缓冲区损坏
 			pduCopy := make([]byte, len(pdu))
 			copy(pduCopy, pdu)
 			m.emitEvent(Event{
-				Type:       EventNewSMSRaw,
-				State:      m.State(),
-				Pdu:        pduCopy,
-				RawQMIType: evt.Type,
-				ServiceID:  evt.ServiceID,
-				MessageID:  evt.MessageID,
+				Type:             EventNewSMSRaw,
+				State:            m.State(),
+				Pdu:              pduCopy,
+				SMSAckRequired:   ackRequired,
+				SMSTransactionID: transactionID,
+				SMSFormat:        format,
+				RawQMIType:       evt.Type,
+				ServiceID:        evt.ServiceID,
+				MessageID:        evt.MessageID,
 			})
 		} else {
 			// Just emit event without index if TLV missing
@@ -3513,6 +3794,21 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 	}
 }
 
+func isEmptyNASEventReport(evt qmi.Event) bool {
+	return evt.Type == qmi.EventNASEventReport && len(packetTLVMeta(evt.Packet)) == 0
+}
+
+func shouldLogRawIndication(evt qmi.Event) bool {
+	switch evt.Type {
+	case qmi.EventUIMSessionClosed:
+		return false
+	case qmi.EventNASEventReport:
+		return !isEmptyNASEventReport(evt)
+	default:
+		return true
+	}
+}
+
 // ============================================================================
 // Radio Reset Recovery
 // ============================================================================
@@ -3584,38 +3880,42 @@ type DecodedSMS struct {
 	ConcatSeq   int
 }
 
-// ReadSMS reads and decodes an SMS message / ReadSMS 读取并解码短信
-func (m *Manager) ReadSMS(storageType uint8, index uint32) (*DecodedSMS, error) {
-	raw, err := m.ReadRawSMS(storageType, index)
-	if err != nil {
-		return nil, err
-	}
-
-	// QMI usually returns [SMSC_Len(1)] + [SMSC(N)] + [TPDU(M)]
-	if len(raw) < 1 {
+func DecodeIncomingSMSPDU(raw []byte, storageType uint8, index uint32) (*DecodedSMS, error) {
+	if len(raw) == 0 {
 		return nil, fmt.Errorf("PDU too short")
 	}
-	smscLen := int(raw[0])
-	tpduOffset := 1 + smscLen
-	if tpduOffset > len(raw) {
-		return nil, fmt.Errorf("invalid PDU: SMSC length mismatch")
-	}
 
-	tpduBytes := raw[tpduOffset:]
+	candidates := make([][]byte, 0, 2)
+	smscLen := int(raw[0])
+	if 1+smscLen <= len(raw) {
+		candidates = append(candidates, raw[1+smscLen:])
+	}
+	candidates = append(candidates, raw)
+
+	var lastErr error
+	for _, tpduBytes := range candidates {
+		resp, err := decodeIncomingTPDU(tpduBytes, storageType, index)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+	}
+	return nil, fmt.Errorf("PDU decode failed: %w", lastErr)
+}
+
+func decodeIncomingTPDU(tpduBytes []byte, storageType uint8, index uint32) (*DecodedSMS, error) {
 	if trimmed, ok := trimDeliverTPDUToDeclaredLength(tpduBytes); ok {
 		tpduBytes = trimmed
 	}
 
 	pd := &tpdu.TPDU{}
 	if err := pd.UnmarshalBinary(tpduBytes); err != nil {
-		return nil, fmt.Errorf("PDU unmarshal failed: %w", err)
+		return nil, err
 	}
 
-	// Decode message text (handles GSM7, UCS2 etc.)
-	// Decode takes a slice of *tpdu.TPDU to handle reassembly of multi-part messages
 	textBytes, err := sms.Decode([]*tpdu.TPDU{pd})
 	if err != nil {
-		return nil, fmt.Errorf("PDU text decode failed: %w", err)
+		return nil, err
 	}
 
 	resp := &DecodedSMS{
@@ -3626,25 +3926,39 @@ func (m *Manager) ReadSMS(storageType uint8, index uint32) (*DecodedSMS, error) 
 		Timestamp: pd.SCTS.Time,
 	}
 
-	// Parse UDH for concat info
+	populateConcatInfo(resp, pd)
+	return resp, nil
+}
+
+func populateConcatInfo(resp *DecodedSMS, pd *tpdu.TPDU) {
+	if resp == nil || pd == nil {
+		return
+	}
 	for _, ie := range pd.UDH {
-		// 0x00: Concat 8-bit, 0x08: Concat 16-bit
 		if ie.ID == 0x00 && len(ie.Data) >= 3 {
 			resp.IsConcat = true
 			resp.ConcatRef = int(ie.Data[0])
 			resp.ConcatTotal = int(ie.Data[1])
 			resp.ConcatSeq = int(ie.Data[2])
-			break
-		} else if ie.ID == 0x08 && len(ie.Data) >= 4 {
+			return
+		}
+		if ie.ID == 0x08 && len(ie.Data) >= 4 {
 			resp.IsConcat = true
 			resp.ConcatRef = int(ie.Data[0])<<8 | int(ie.Data[1])
 			resp.ConcatTotal = int(ie.Data[2])
 			resp.ConcatSeq = int(ie.Data[3])
-			break
+			return
 		}
 	}
+}
 
-	return resp, nil
+// ReadSMS reads and decodes an SMS message / ReadSMS 读取并解码短信
+func (m *Manager) ReadSMS(storageType uint8, index uint32) (*DecodedSMS, error) {
+	raw, err := m.ReadRawSMS(storageType, index)
+	if err != nil {
+		return nil, err
+	}
+	return DecodeIncomingSMSPDU(raw, storageType, index)
 }
 
 // SendRawSMS sends a raw SMS PDU / SendRawSMS 发送原始短信 PDU

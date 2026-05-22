@@ -3,9 +3,57 @@ package qmi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
+
+func TestClientLogfUsesInjectedLogger(t *testing.T) {
+	var gotLevel ClientLogLevel
+	var gotMessage string
+	c := &Client{
+		opts: ClientOptions{
+			Logf: func(level ClientLogLevel, format string, args ...any) {
+				gotLevel = level
+				gotMessage = fmt.Sprintf(format, args...)
+			},
+		},
+	}
+
+	c.logf(ClientLogLevelDebug, "hello %s", "qmi")
+
+	if gotLevel != ClientLogLevelDebug {
+		t.Fatalf("level=%v want %v", gotLevel, ClientLogLevelDebug)
+	}
+	if gotMessage != "hello qmi" {
+		t.Fatalf("message=%q want %q", gotMessage, "hello qmi")
+	}
+}
+
+func TestDispatchIndicationClassifiesNASEventReportSeparately(t *testing.T) {
+	c := &Client{
+		eventCh:            make(chan Event, 1),
+		indicationInCh:     nil,
+		closeCh:            make(chan struct{}),
+		transactions:       make(map[uint32]*transactionEntry),
+		recentTransactions: make(map[uint32]recentTransaction),
+		clientIDs:          make(map[uint8]uint8),
+	}
+
+	c.dispatchIndication(&Packet{
+		ServiceType:  ServiceNAS,
+		MessageID:    NASEventReportInd,
+		IsIndication: true,
+	})
+
+	got := <-c.eventCh
+	if got.Type != EventNASEventReport {
+		t.Fatalf("event type=%v want EventNASEventReport", got.Type)
+	}
+	if got.ServiceID != ServiceNAS || got.MessageID != NASEventReportInd {
+		t.Fatalf("raw ids service=0x%02x msg=0x%04x", got.ServiceID, got.MessageID)
+	}
+}
 
 func TestModemResetIndicationNotDroppedWhenQueueFull(t *testing.T) {
 	c := &Client{
