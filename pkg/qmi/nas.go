@@ -122,6 +122,13 @@ const (
 	NASServiceDomainPreferencePSDetach uint32 = 0x04
 )
 
+const (
+	NASVoiceDomainPreferenceCSOnly      uint32 = 0x00
+	NASVoiceDomainPreferencePSOnly      uint32 = 0x01
+	NASVoiceDomainPreferenceCSPreferred uint32 = 0x02
+	NASVoiceDomainPreferencePSPreferred uint32 = 0x03
+)
+
 // NetworkScanResult represents a network found during scan / NetworkScanResult 代表扫描期间发现的网络
 type NetworkScanResult struct {
 	MCC         string

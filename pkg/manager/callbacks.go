@@ -49,6 +49,7 @@ const (
 	EventUIMSlotStatus                                          // UIM slot status indication / UIM 卡槽状态指示
 	EventNASEventReport                                         // NAS event report / NAS 事件报告
 	EventUnknownIndication                                      // Unknown indication / 未知指示
+	EventVoiceSupplementaryServiceRequest                       // Voice supplementary service request indication / 语音补充业务请求指示
 )
 
 func (e EventType) String() string {
@@ -83,6 +84,8 @@ func (e EventType) String() string {
 		return "VoiceUSSDReleased"
 	case EventVoiceSupplementaryService:
 		return "VoiceSupplementaryService"
+	case EventVoiceSupplementaryServiceRequest:
+		return "VoiceSupplementaryServiceRequest"
 	case EventVoiceUSSDNoWaitResult:
 		return "VoiceUSSDNoWaitResult"
 	case EventWMSSMSCAddress:
@@ -124,39 +127,40 @@ func (e EventType) String() string {
 
 // Event represents a connection event / Event 表示连接事件
 type Event struct {
-	Type                     EventType                                // Event type / 事件类型
-	State                    State                                    // Current state / 当前状态
-	Settings                 *qmi.RuntimeSettings                     // IP settings (for Connected/IPChanged) / IP 设置
-	Error                    error                                    // Error (for DialFailed) / 错误信息
-	Signal                   *qmi.SignalStrength                      // Signal info (for SignalUpdate) / 信号信息
-	SMSIndex                 uint32                                   // SMS index (for NewSMS) / 短信索引
-	StorageType              uint8                                    // SMS storage type (for NewSMS) / 短信存储类型
-	Pdu                      []byte                                   // SMS Raw Data PDU (for EventNewSMSRaw) / 短信原始 PDU 数据
-	SMSAckRequired           bool                                     // Raw SMS requires WMS ack / 原始短信需要 WMS ACK
-	SMSTransactionID         uint32                                   // Raw SMS transaction ID for WMS ack / 原始短信 ACK 事务 ID
-	SMSFormat                uint8                                    // Raw SMS format / 原始短信格式
-	IMSRegistration          *qmi.IMSARegistrationStatus              // IMS registration status / IMS 注册状态
-	IMSServices              *qmi.IMSAServicesStatus                  // IMS services status / IMS 业务状态
-	IMSSettings              *qmi.IMSServicesEnabledSettings          // IMS enabled settings / IMS 配置状态
-	VoiceCalls               *qmi.VoiceAllCallInfo                    // Voice call status / 语音通话状态
-	VoiceUSSD                *qmi.VoiceUSSDIndication                 // Voice USSD / 语音 USSD
-	VoiceSupplementary       *qmi.VoiceSupplementaryServiceIndication // Voice supplementary service / 语音补充业务
-	VoiceUSSDNoWait          *qmi.VoiceUSSDNoWaitIndication           // Voice async USSD result / 异步 USSD 结果
-	ServingSystem            *qmi.ServingSystem                       // NAS serving system / NAS 服务系统
-	NASOperatorName          *qmi.NASOperatorNameInfo                 // NAS operator name / NAS 运营商名称
-	NASNetworkTime           *qmi.NetworkTimeInfo                     // NAS network time / NAS 网络时间
-	NASSignalInfo            *qmi.SignalInfo                          // NAS signal info / NAS 信号详情
-	NASNetworkReject         *qmi.NASNetworkRejectInfo                // NAS network reject / NAS 驻网拒绝
-	NASIncrementalNetwork    *qmi.NASIncrementalNetworkScanInfo       // NAS incremental scan / NAS 增量搜网
-	PacketServiceStatus      qmi.ConnectionStatus                     // WDS packet service status / WDS 数据服务状态
-	UIMRefresh               *qmi.UIMRefreshIndication                // UIM refresh indication payload / UIM 刷新指示载荷
-	UIMSlotStatus            *qmi.UIMSlotStatus                       // UIM slot status indication payload / UIM 卡槽状态指示载荷
-	WMSSMSCAddress           *qmi.WMSSMSCAddress                      // WMS SMSC address / WMS 短信中心地址
-	WMSTransportRegistration qmi.WMSTransportNetworkRegistration      // WMS transport registration / WMS 传输网络注册状态
-	TLVMeta                  []qmi.TLVMeta                            // TLV metadata for diagnostics / TLV 元数据（诊断用）
-	RawQMIType               qmi.EventType                            // Raw QMI event type / 原始 QMI 事件类型
-	ServiceID                uint8                                    // QMI service id / QMI 服务 ID
-	MessageID                uint16                                   // QMI message id / QMI 消息 ID
+	Type                      EventType                                       // Event type / 事件类型
+	State                     State                                           // Current state / 当前状态
+	Settings                  *qmi.RuntimeSettings                            // IP settings (for Connected/IPChanged) / IP 设置
+	Error                     error                                           // Error (for DialFailed) / 错误信息
+	Signal                    *qmi.SignalStrength                             // Signal info (for SignalUpdate) / 信号信息
+	SMSIndex                  uint32                                          // SMS index (for NewSMS) / 短信索引
+	StorageType               uint8                                           // SMS storage type (for NewSMS) / 短信存储类型
+	Pdu                       []byte                                          // SMS Raw Data PDU (for EventNewSMSRaw) / 短信原始 PDU 数据
+	SMSAckRequired            bool                                            // Raw SMS requires WMS ack / 原始短信需要 WMS ACK
+	SMSTransactionID          uint32                                          // Raw SMS transaction ID for WMS ack / 原始短信 ACK 事务 ID
+	SMSFormat                 uint8                                           // Raw SMS format / 原始短信格式
+	IMSRegistration           *qmi.IMSARegistrationStatus                     // IMS registration status / IMS 注册状态
+	IMSServices               *qmi.IMSAServicesStatus                         // IMS services status / IMS 业务状态
+	IMSSettings               *qmi.IMSServicesEnabledSettings                 // IMS enabled settings / IMS 配置状态
+	VoiceCalls                *qmi.VoiceAllCallInfo                           // Voice call status / 语音通话状态
+	VoiceUSSD                 *qmi.VoiceUSSDIndication                        // Voice USSD / 语音 USSD
+	VoiceSupplementary        *qmi.VoiceSupplementaryServiceIndication        // Voice supplementary service / 语音补充业务
+	VoiceSupplementaryRequest *qmi.VoiceSupplementaryServiceRequestIndication // Voice supplementary service request / 语音补充业务请求
+	VoiceUSSDNoWait           *qmi.VoiceUSSDNoWaitIndication                  // Voice async USSD result / 异步 USSD 结果
+	ServingSystem             *qmi.ServingSystem                              // NAS serving system / NAS 服务系统
+	NASOperatorName           *qmi.NASOperatorNameInfo                        // NAS operator name / NAS 运营商名称
+	NASNetworkTime            *qmi.NetworkTimeInfo                            // NAS network time / NAS 网络时间
+	NASSignalInfo             *qmi.SignalInfo                                 // NAS signal info / NAS 信号详情
+	NASNetworkReject          *qmi.NASNetworkRejectInfo                       // NAS network reject / NAS 驻网拒绝
+	NASIncrementalNetwork     *qmi.NASIncrementalNetworkScanInfo              // NAS incremental scan / NAS 增量搜网
+	PacketServiceStatus       qmi.ConnectionStatus                            // WDS packet service status / WDS 数据服务状态
+	UIMRefresh                *qmi.UIMRefreshIndication                       // UIM refresh indication payload / UIM 刷新指示载荷
+	UIMSlotStatus             *qmi.UIMSlotStatus                              // UIM slot status indication payload / UIM 卡槽状态指示载荷
+	WMSSMSCAddress            *qmi.WMSSMSCAddress                             // WMS SMSC address / WMS 短信中心地址
+	WMSTransportRegistration  qmi.WMSTransportNetworkRegistration             // WMS transport registration / WMS 传输网络注册状态
+	TLVMeta                   []qmi.TLVMeta                                   // TLV metadata for diagnostics / TLV 元数据（诊断用）
+	RawQMIType                qmi.EventType                                   // Raw QMI event type / 原始 QMI 事件类型
+	ServiceID                 uint8                                           // QMI service id / QMI 服务 ID
+	MessageID                 uint16                                          // QMI message id / QMI 消息 ID
 }
 
 // EventHandler is a callback function for connection events / EventHandler 是连接事件的回调函数
@@ -320,6 +324,17 @@ func cloneVoiceSupplementaryServiceIndication(in *qmi.VoiceSupplementaryServiceI
 	return &out
 }
 
+func cloneVoiceSupplementaryServiceRequestIndication(in *qmi.VoiceSupplementaryServiceRequestIndication) *qmi.VoiceSupplementaryServiceRequestIndication {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.USSData = cloneVoiceUSSDPayload(in.USSData)
+	out.Alpha = cloneVoiceUSSDPayload(in.Alpha)
+	out.EncodedDataUTF16 = cloneUint16s(in.EncodedDataUTF16)
+	return &out
+}
+
 func cloneVoiceUSSDNoWaitIndication(in *qmi.VoiceUSSDNoWaitIndication) *qmi.VoiceUSSDNoWaitIndication {
 	if in == nil {
 		return nil
@@ -459,6 +474,7 @@ func cloneEvent(event Event) Event {
 	out.VoiceCalls = cloneVoiceAllCallInfo(event.VoiceCalls)
 	out.VoiceUSSD = cloneVoiceUSSDIndication(event.VoiceUSSD)
 	out.VoiceSupplementary = cloneVoiceSupplementaryServiceIndication(event.VoiceSupplementary)
+	out.VoiceSupplementaryRequest = cloneVoiceSupplementaryServiceRequestIndication(event.VoiceSupplementaryRequest)
 	out.VoiceUSSDNoWait = cloneVoiceUSSDNoWaitIndication(event.VoiceUSSDNoWait)
 	out.ServingSystem = cloneServingSystemForEvent(event.ServingSystem)
 	out.NASOperatorName = cloneNASOperatorNameInfo(event.NASOperatorName)
@@ -658,6 +674,15 @@ func (m *Manager) OnVoiceSupplementaryService(handler func(info *qmi.VoiceSupple
 	m.OnEvent(func(e Event) {
 		if e.Type == EventVoiceSupplementaryService && handler != nil {
 			handler(e.VoiceSupplementary)
+		}
+	})
+}
+
+// OnVoiceSupplementaryServiceRequest registers a callback for supplementary service request indications.
+func (m *Manager) OnVoiceSupplementaryServiceRequest(handler func(info *qmi.VoiceSupplementaryServiceRequestIndication)) {
+	m.OnEvent(func(e Event) {
+		if e.Type == EventVoiceSupplementaryServiceRequest && handler != nil {
+			handler(e.VoiceSupplementaryRequest)
 		}
 	})
 }

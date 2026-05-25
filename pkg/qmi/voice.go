@@ -98,6 +98,27 @@ type VoiceSupplementaryServiceIndication struct {
 	NotificationType uint8
 }
 
+type VoiceSupplementaryServiceRequestIndication struct {
+	Request                 uint8
+	ModifiedByCallControl   bool
+	HasInfo                 bool
+	ServiceClass            uint8
+	HasServiceClass         bool
+	Reason                  uint8
+	HasReason               bool
+	USSData                 *VoiceUSSDPayload
+	CallID                  uint8
+	HasCallID               bool
+	Alpha                   *VoiceUSSDPayload
+	DataSource              uint8
+	HasDataSource           bool
+	FailureCause            uint16
+	HasFailureCause         bool
+	EncodedDataUTF16        []uint16
+	ExtendedServiceClass    uint8
+	HasExtendedServiceClass bool
+}
+
 type VoiceUSSDRequest struct {
 	DCS  uint8
 	Data []byte
@@ -196,27 +217,28 @@ type VoiceConfig struct {
 // ============================================================================
 
 const (
-	VOICEIndicationRegister      uint16 = 0x0003
-	VOICEGetSupportedMessages    uint16 = 0x001E
-	VOICEDialCall                uint16 = 0x0020
-	VOICEEndCall                 uint16 = 0x0021
-	VOICEAnswerCall              uint16 = 0x0022
-	VOICEBurstDTMF               uint16 = 0x0028
-	VOICEStartContinuousDTMF     uint16 = 0x0029
-	VOICEStopContinuousDTMF      uint16 = 0x002A
-	VOICEAllCallStatusInd        uint16 = 0x002E
-	VOICEGetAllCallInfo          uint16 = 0x002F
-	VOICEManageCalls             uint16 = 0x0031
-	VOICESupplementaryServiceInd uint16 = 0x0032
-	VOICESetSupplementaryService uint16 = 0x0033
-	VOICEGetCallWaiting          uint16 = 0x0034
-	VOICEOriginateUSSD           uint16 = 0x003A
-	VOICEAnswerUSSD              uint16 = 0x003B
-	VOICECancelUSSD              uint16 = 0x003C
-	VOICEReleaseUSSDInd          uint16 = 0x003D
-	VOICEUSSDInd                 uint16 = 0x003E
-	VOICEGetConfig               uint16 = 0x0041
-	VOICEOriginateUSSDNoWait     uint16 = 0x0043
+	VOICEIndicationRegister             uint16 = 0x0003
+	VOICEGetSupportedMessages           uint16 = 0x001E
+	VOICEDialCall                       uint16 = 0x0020
+	VOICEEndCall                        uint16 = 0x0021
+	VOICEAnswerCall                     uint16 = 0x0022
+	VOICEBurstDTMF                      uint16 = 0x0028
+	VOICEStartContinuousDTMF            uint16 = 0x0029
+	VOICEStopContinuousDTMF             uint16 = 0x002A
+	VOICEAllCallStatusInd               uint16 = 0x002E
+	VOICEGetAllCallInfo                 uint16 = 0x002F
+	VOICEManageCalls                    uint16 = 0x0031
+	VOICESupplementaryServiceInd        uint16 = 0x0032
+	VOICESetSupplementaryService        uint16 = 0x0033
+	VOICEGetCallWaiting                 uint16 = 0x0034
+	VOICEOriginateUSSD                  uint16 = 0x003A
+	VOICEAnswerUSSD                     uint16 = 0x003B
+	VOICECancelUSSD                     uint16 = 0x003C
+	VOICEReleaseUSSDInd                 uint16 = 0x003D
+	VOICEUSSDInd                        uint16 = 0x003E
+	VOICEGetConfig                      uint16 = 0x0041
+	VOICESupplementaryServiceRequestInd uint16 = 0x0042
+	VOICEOriginateUSSDNoWait            uint16 = 0x0043
 )
 
 // ============================================================================
@@ -394,6 +416,64 @@ func ParseVoiceSupplementaryServiceIndication(packet *Packet) (*VoiceSupplementa
 		CallID:           tlv.Value[0],
 		NotificationType: tlv.Value[1],
 	}, nil
+}
+
+func ParseVoiceSupplementaryServiceRequestIndication(packet *Packet) (*VoiceSupplementaryServiceRequestIndication, error) {
+	info := &VoiceSupplementaryServiceRequestIndication{}
+	if tlv := FindTLV(packet.TLVs, 0x01); tlv != nil {
+		if len(tlv.Value) < 2 {
+			return nil, fmt.Errorf("supplementary service request indication info TLV too short")
+		}
+		info.Request = tlv.Value[0]
+		info.ModifiedByCallControl = tlv.Value[1] != 0
+		info.HasInfo = true
+	}
+	if tlv := FindTLV(packet.TLVs, 0x10); tlv != nil && len(tlv.Value) >= 1 {
+		info.ServiceClass = tlv.Value[0]
+		info.HasServiceClass = true
+	}
+	if tlv := FindTLV(packet.TLVs, 0x11); tlv != nil && len(tlv.Value) >= 1 {
+		info.Reason = tlv.Value[0]
+		info.HasReason = true
+	}
+	if tlv := FindTLV(packet.TLVs, 0x14); tlv != nil {
+		payload, err := parseVoiceUSSDPayloadTLV(tlv)
+		if err != nil {
+			return nil, err
+		}
+		info.USSData = payload
+	}
+	if tlv := FindTLV(packet.TLVs, 0x15); tlv != nil && len(tlv.Value) >= 1 {
+		info.CallID = tlv.Value[0]
+		info.HasCallID = true
+	}
+	if tlv := FindTLV(packet.TLVs, 0x16); tlv != nil {
+		payload, err := parseVoiceUSSDPayloadTLV(tlv)
+		if err != nil {
+			return nil, err
+		}
+		info.Alpha = payload
+	}
+	if tlv := FindTLV(packet.TLVs, 0x19); tlv != nil && len(tlv.Value) >= 1 {
+		info.DataSource = tlv.Value[0]
+		info.HasDataSource = true
+	}
+	if tlv := FindTLV(packet.TLVs, 0x1A); tlv != nil && len(tlv.Value) >= 2 {
+		info.FailureCause = binary.LittleEndian.Uint16(tlv.Value[0:2])
+		info.HasFailureCause = true
+	}
+	if tlv := FindTLV(packet.TLVs, 0x21); tlv != nil {
+		values, err := parseUint16ArrayWithUint8Length(tlv.Value)
+		if err != nil {
+			return nil, err
+		}
+		info.EncodedDataUTF16 = values
+	}
+	if tlv := FindTLV(packet.TLVs, 0x22); tlv != nil && len(tlv.Value) >= 1 {
+		info.ExtendedServiceClass = tlv.Value[0]
+		info.HasExtendedServiceClass = true
+	}
+	return info, nil
 }
 
 func ParseVoiceUSSDIndication(packet *Packet) (*VoiceUSSDIndication, error) {

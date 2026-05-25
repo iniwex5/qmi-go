@@ -151,6 +151,37 @@ func TestHandleIndicationVoiceSupplementaryService(t *testing.T) {
 	}
 }
 
+func TestHandleIndicationVoiceSupplementaryServiceRequest(t *testing.T) {
+	m := &Manager{
+		log:    NewNopLogger(),
+		events: NewEventEmitter(),
+	}
+	ch := make(chan Event, 1)
+	m.OnEvent(func(evt Event) {
+		ch <- evt
+	})
+
+	packet := &qmi.Packet{
+		TLVs: []qmi.TLV{
+			{Type: 0x01, Value: []byte{0x07, 0x01}},
+			{Type: 0x14, Value: []byte{0x01, 0x05, '*', '1', '0', '0', '#'}},
+			{Type: 0x21, Value: []byte{0x02, 0x4f, 0x00, 0x4b, 0x00}},
+		},
+	}
+
+	m.handleIndication(qmi.Event{Type: qmi.EventVoiceSupplementaryServiceRequest, Packet: packet})
+	evt := waitManagerEvent(t, ch)
+	if evt.Type != EventVoiceSupplementaryServiceRequest {
+		t.Fatalf("unexpected event type: %v", evt.Type)
+	}
+	if evt.VoiceSupplementaryRequest == nil || !evt.VoiceSupplementaryRequest.HasInfo || evt.VoiceSupplementaryRequest.Request != 0x07 {
+		t.Fatalf("unexpected supplementary request payload: %+v", evt.VoiceSupplementaryRequest)
+	}
+	if evt.VoiceSupplementaryRequest.USSData == nil || evt.VoiceSupplementaryRequest.USSData.Text != "*100#" {
+		t.Fatalf("unexpected supplementary request USS data: %+v", evt.VoiceSupplementaryRequest)
+	}
+}
+
 func TestVoiceIndicationRegistrationDisabled(t *testing.T) {
 	m := &Manager{cfg: Config{DisableVOICEInd: true}}
 	cfg, ok := m.voiceIndicationRegistration()

@@ -228,6 +228,51 @@ func TestParseVoiceSupplementaryServiceIndication(t *testing.T) {
 	}
 }
 
+func TestParseVoiceSupplementaryServiceRequestIndication(t *testing.T) {
+	packet := &Packet{
+		TLVs: []TLV{
+			{Type: 0x01, Value: []byte{0x07, 0x01}},
+			{Type: 0x10, Value: []byte{0x01}},
+			{Type: 0x11, Value: []byte{0x0f}},
+			{Type: 0x14, Value: []byte{0x01, 0x05, '*', '1', '0', '0', '#'}},
+			{Type: 0x15, Value: []byte{0x09}},
+			{Type: 0x16, Value: []byte{0x01, 0x02, 'O', 'K'}},
+			{Type: 0x1a, Value: []byte{0x7d, 0x00}},
+			{Type: 0x21, Value: []byte{0x02, 0x4f, 0x00, 0x4b, 0x00}},
+			{Type: 0x22, Value: []byte{0x03}},
+		},
+	}
+
+	info, err := ParseVoiceSupplementaryServiceRequestIndication(packet)
+	if err != nil {
+		t.Fatalf("ParseVoiceSupplementaryServiceRequestIndication returned error: %v", err)
+	}
+	if !info.HasInfo || info.Request != 0x07 || !info.ModifiedByCallControl {
+		t.Fatalf("unexpected supplementary request info: %+v", info)
+	}
+	if !info.HasServiceClass || info.ServiceClass != 0x01 || !info.HasReason || info.Reason != 0x0f {
+		t.Fatalf("unexpected service class/reason: %+v", info)
+	}
+	if info.USSData == nil || info.USSData.Text != "*100#" {
+		t.Fatalf("unexpected USS data: %+v", info.USSData)
+	}
+	if !info.HasCallID || info.CallID != 0x09 {
+		t.Fatalf("unexpected call ID: %+v", info)
+	}
+	if info.Alpha == nil || info.Alpha.Text != "OK" {
+		t.Fatalf("unexpected alpha: %+v", info.Alpha)
+	}
+	if !info.HasFailureCause || info.FailureCause != 0x007d {
+		t.Fatalf("unexpected failure cause: %+v", info)
+	}
+	if len(info.EncodedDataUTF16) != 2 || info.EncodedDataUTF16[0] != 0x004f {
+		t.Fatalf("unexpected encoded data: %+v", info.EncodedDataUTF16)
+	}
+	if !info.HasExtendedServiceClass || info.ExtendedServiceClass != 0x03 {
+		t.Fatalf("unexpected extended service class: %+v", info)
+	}
+}
+
 func TestParseVoiceUSSDResponse(t *testing.T) {
 	resp := &Packet{
 		TLVs: []TLV{
@@ -369,6 +414,7 @@ func TestDispatchVoiceIndications(t *testing.T) {
 	}{
 		{msgID: VOICEAllCallStatusInd, want: EventVoiceCallStatus},
 		{msgID: VOICESupplementaryServiceInd, want: EventVoiceSupplementaryService},
+		{msgID: VOICESupplementaryServiceRequestInd, want: EventVoiceSupplementaryServiceRequest},
 		{msgID: VOICEUSSDInd, want: EventUSSD},
 		{msgID: VOICEReleaseUSSDInd, want: EventVoiceUSSDReleased},
 		{msgID: VOICEOriginateUSSDNoWait, want: EventVoiceUSSDNoWaitResult},

@@ -3721,6 +3721,21 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 			MessageID:          evt.MessageID,
 		})
 
+	case qmi.EventVoiceSupplementaryServiceRequest:
+		info, err := qmi.ParseVoiceSupplementaryServiceRequestIndication(evt.Packet)
+		if err != nil {
+			m.log.WithError(err).Warn("Failed to parse VOICE supplementary service request indication")
+			return
+		}
+		m.emitEvent(Event{
+			Type:                      EventVoiceSupplementaryServiceRequest,
+			State:                     m.State(),
+			VoiceSupplementaryRequest: info,
+			RawQMIType:                evt.Type,
+			ServiceID:                 evt.ServiceID,
+			MessageID:                 evt.MessageID,
+		})
+
 	case qmi.EventUSSD:
 		info, err := qmi.ParseVoiceUSSDIndication(evt.Packet)
 		if err != nil {

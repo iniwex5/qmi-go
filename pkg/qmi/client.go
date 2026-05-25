@@ -44,6 +44,7 @@ const (
 	EventUIMRefresh                                      // UIM refresh indication / UIM 刷新指示
 	EventUIMSlotStatus                                   // UIM slot status indication / UIM 卡槽状态指示
 	EventNASEventReport                                  // NAS event report / NAS 事件报告
+	EventVoiceSupplementaryServiceRequest                // Voice supplementary service request indication / VOICE 补充业务请求指示
 )
 
 // Event represents an asynchronous indication from the modem / Event代表来自modem的异步指示
@@ -770,6 +771,8 @@ func (c *Client) dispatchIndication(p *Packet) {
 		eventType = EventVoiceCallStatus
 	case p.ServiceType == ServiceVOICE && p.MessageID == VOICESupplementaryServiceInd:
 		eventType = EventVoiceSupplementaryService
+	case p.ServiceType == ServiceVOICE && p.MessageID == VOICESupplementaryServiceRequestInd:
+		eventType = EventVoiceSupplementaryServiceRequest
 	case p.ServiceType == ServiceVOICE && p.MessageID == VOICEUSSDInd:
 		eventType = EventUSSD
 	case p.ServiceType == ServiceVOICE && p.MessageID == VOICEReleaseUSSDInd:
