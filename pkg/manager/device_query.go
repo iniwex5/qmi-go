@@ -1037,3 +1037,9 @@ func (e *SMSNotReadyError) Error() string {
 		e.TransportQueryError,
 	)
 }
+
+func (m *Manager) NASPerformNetworkScan(ctx context.Context) ([]qmi.NetworkScanResult, error) {
+	return withNASRecoveryValue(m, "NASPerformNetworkScan", func(nas *qmi.NASService) ([]qmi.NetworkScanResult, error) {
+		return nas.PerformNetworkScan(ctx)
+	})
+}
