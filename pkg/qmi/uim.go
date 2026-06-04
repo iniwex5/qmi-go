@@ -1,6 +1,7 @@
 package qmi
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/hex"
@@ -90,6 +91,17 @@ const (
 	UIMCardProtocolICC     uint32 = 1
 	UIMCardProtocolUICC    uint32 = 2
 )
+
+const (
+	UIMAppTypeUnknown uint8 = 0
+	UIMAppTypeSIM     uint8 = 1
+	UIMAppTypeUSIM    uint8 = 2
+	UIMAppTypeRUIM    uint8 = 3
+	UIMAppTypeCSIM    uint8 = 4
+	UIMAppTypeISIM    uint8 = 5
+)
+
+var uimUSIMAIDPrefix = []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x02}
 
 // CardStatus represents the SIM card status / CardStatus代表SIM卡状态
 
@@ -429,6 +441,23 @@ func (u *UIMService) GetCardStatusDetails(ctx context.Context) (*CardStatusDetai
 func (u *UIMService) GetCardStatus(ctx context.Context) (SIMStatus, error) {
 	_, st, err := u.GetCardStatusDetails(ctx)
 	return st, err
+}
+
+func (u *UIMService) GetUSIMAID(ctx context.Context) ([]byte, error) {
+	details, _, err := u.GetCardStatusDetails(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if details == nil {
+		return nil, fmt.Errorf("UIM card status details missing")
+	}
+	if details.AppType != UIMAppTypeUSIM {
+		return nil, fmt.Errorf("UIM USIM application not found: app_type=0x%02x", details.AppType)
+	}
+	if len(details.AID) < len(uimUSIMAIDPrefix) || !bytes.Equal(details.AID[:len(uimUSIMAIDPrefix)], uimUSIMAIDPrefix) {
+		return nil, fmt.Errorf("UIM USIM AID invalid: %X", details.AID)
+	}
+	return append([]byte(nil), details.AID...), nil
 }
 
 // VerifyPIN verifies the PIN code / VerifyPIN 验证 PIN 码

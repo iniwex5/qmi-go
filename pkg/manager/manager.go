@@ -1944,6 +1944,12 @@ func (m *Manager) GetSIMMetadata(ctx context.Context) (*qmi.SIMMetadata, error) 
 	})
 }
 
+func (m *Manager) GetUSIMAID(ctx context.Context) ([]byte, error) {
+	return withUIMRecoveryValue(m, "GetUSIMAID", func(uim *qmi.UIMService) ([]byte, error) {
+		return uim.GetUSIMAID(ctx)
+	})
+}
+
 func (m *Manager) GetNativeMCCMNC(ctx context.Context) (mcc, mnc string, err error) {
 	type nativeLocation struct {
 		mcc string

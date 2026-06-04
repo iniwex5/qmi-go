@@ -83,6 +83,37 @@ func requestRecordNumber(req *Packet) uint16 {
 	return binary.LittleEndian.Uint16(tlv.Value[0:2])
 }
 
+func cardStatusPacketWithUSIMAID(aid []byte) *Packet {
+	value := make([]byte, 15, 15+7+len(aid)+7)
+	value[8] = 1                        // number of slots
+	value[9] = 0x01                     // card present
+	value[10] = byte(PINStatusDisabled) // UPIN state
+	value[14] = 1                       // number of applications
+	value = append(value,
+		UIMAppTypeUSIM, // app type
+		0x01,           // app state
+		0x00,           // personalization state
+		0x00,           // personalization feature
+		0x00,           // personalization retries
+		0x00,           // personalization unblock retries
+		byte(len(aid)),
+	)
+	value = append(value, aid...)
+	value = append(value,
+		0x00,                    // UPIN not used
+		byte(PINStatusDisabled), // PIN1 state
+		0x03,                    // PIN1 retries
+		0x0A,                    // PUK1 retries
+		byte(PINStatusDisabled), // PIN2 state
+		0x03,                    // PIN2 retries
+		0x0A,                    // PUK2 retries
+	)
+	return &Packet{TLVs: []TLV{
+		successResultTLV(),
+		{Type: 0x10, Value: value},
+	}}
+}
+
 func sameBytes(a, b []byte) bool {
 	if len(a) != len(b) {
 		return false
@@ -93,6 +124,27 @@ func sameBytes(a, b []byte) bool {
 		}
 	}
 	return true
+}
+
+func TestUIMServiceGetUSIMAIDUsesFullCardStatusAID(t *testing.T) {
+	client := newUIMUnitTestClient()
+	aid := []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x02, 0xFF, 0x49, 0xFF, 0x01, 0x89}
+	stop := serveUIMUnitTestRequests(t, client, func(req *Packet) *Packet {
+		if req.MessageID != UIMGetCardStatus {
+			t.Fatalf("unexpected message id 0x%04x", req.MessageID)
+		}
+		return cardStatusPacketWithUSIMAID(aid)
+	})
+	defer stop()
+	uim := &UIMService{client: client, clientID: 1}
+
+	got, err := uim.GetUSIMAID(context.Background())
+	if err != nil {
+		t.Fatalf("GetUSIMAID() error = %v", err)
+	}
+	if !sameBytes(got, aid) {
+		t.Fatalf("GetUSIMAID() = %X, want %X", got, aid)
+	}
 }
 
 func qmiErrorPacket(code uint16) *Packet {
