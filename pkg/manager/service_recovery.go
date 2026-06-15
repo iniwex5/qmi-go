@@ -167,9 +167,9 @@ func (m *Manager) logServiceRecovery(service string, op string, phase string, er
 	entry.WithError(err).Warn(message)
 }
 
-func (m *Manager) triggerCoreRecoveryFromService(service string, op string, phase string, cause error) {
+func (m *Manager) triggerCoreRecoveryFromService(service string, op string, phase string, cause error) bool {
 	if m == nil {
-		return
+		return false
 	}
 
 	m.mu.RLock()
@@ -177,7 +177,7 @@ func (m *Manager) triggerCoreRecoveryFromService(service string, op string, phas
 	stopping := m.state == StateStopping
 	m.mu.RUnlock()
 	if !coreReady || stopping {
-		return
+		return false
 	}
 
 	cooldown := m.uimRecoverCooldown
@@ -194,13 +194,41 @@ func (m *Manager) triggerCoreRecoveryFromService(service string, op string, phas
 			WithField("op", op).
 			WithField("phase", phase).
 			Debug("Skip core recovery trigger due to cooldown")
-		return
+		return false
 	}
 	m.uimLastRecoverSignal = now
 	m.uimRecoveryMu.Unlock()
 
 	m.logServiceRecovery(service, op, "recover-core", cause, "Scheduling core recovery due to service failure")
 	m.enqueueModemResetEvent(strings.ToLower(service) + "_recovery")
+	return true
+}
+
+// RequestCoreRecovery asks the manager to run the same core recovery path used
+// for modem reset/service-failure handling. It is intended for higher-level
+// flows that have already classified a service stall, such as post-eSIM-switch
+// convergence.
+func (m *Manager) RequestCoreRecovery(reason string) bool {
+	if m == nil {
+		return false
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "external_request"
+	}
+
+	m.mu.RLock()
+	coreReady := m.coreReady
+	stopping := m.state == StateStopping
+	m.mu.RUnlock()
+	if !coreReady || stopping {
+		return false
+	}
+
+	cause := fmt.Errorf("%s", reason)
+	m.logServiceRecovery("POST_SWITCH", reason, "recover-core", cause, "Scheduling core recovery due to explicit request")
+	m.enqueueModemResetEvent("post_switch_recovery")
+	return true
 }
 
 func (m *Manager) maybeReplayWMSStateAfterRebind(reason string) {
