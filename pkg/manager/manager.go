@@ -366,6 +366,12 @@ const recoverBackoffBase = 500 * time.Millisecond
 const recoverBackoffMax = 15 * time.Second
 const recoverBackoffJitterRatio = 0.2
 
+// fullCheckJitterRatio 是健康检查周期 (HealthPolicy.FullCheckInterval) 每次重新调度时
+// 附加的随机抖动比例。多个 Manager 实例（如双模组共用同一个 qmi-proxy 时）若各自的
+// 检查周期固定且启动时间相近，会长期保持锁相，导致周期性同时向 proxy 发起突发请求；
+// 每次 tick 后用新的随机间隔重新调度，能持续打散这种对齐，而不只是一次性错开。
+const fullCheckJitterRatio = 0.2
+
 var (
 	smsReadyWaitTimeout   = 8 * time.Second
 	smsReadyPollInterval  = 500 * time.Millisecond
@@ -2887,8 +2893,8 @@ func runCleanupTasks(ctx context.Context, log Logger, tasks []cleanupTask) []cle
 func (m *Manager) eventLoop() {
 	defer m.wg.Done()
 
-	checkTicker := time.NewTicker(m.cfg.HealthPolicy.FullCheckInterval)
-	defer checkTicker.Stop()
+	checkTimer := time.NewTimer(jitteredFullCheckInterval(m.cfg.HealthPolicy.FullCheckInterval))
+	defer checkTimer.Stop()
 
 	for {
 		select {
@@ -2898,8 +2904,9 @@ func (m *Manager) eventLoop() {
 		case evt := <-m.eventCh:
 			m.handleEvent(evt)
 
-		case <-checkTicker.C:
+		case <-checkTimer.C:
 			m.eventCh <- eventCheckFull
+			checkTimer.Reset(jitteredFullCheckInterval(m.cfg.HealthPolicy.FullCheckInterval))
 		}
 	}
 }
@@ -3287,6 +3294,24 @@ func (m *Manager) getRecoverDelay() time.Duration {
 
 	m.recoverBackoffMs.Store(uint64(delay / time.Millisecond))
 	return delay
+}
+
+// jitteredFullCheckInterval 在 base 基础上加 ±fullCheckJitterRatio 的随机抖动。
+// base<=0 时回退到 defaultHealthPolicy.FullCheckInterval。
+func jitteredFullCheckInterval(base time.Duration) time.Duration {
+	if base <= 0 {
+		base = defaultHealthPolicy.FullCheckInterval
+	}
+	jitterRange := time.Duration(float64(base) * fullCheckJitterRatio)
+	if jitterRange <= 0 {
+		return base
+	}
+	jitter := time.Duration(rand.Int63n(int64(jitterRange)*2+1)) - jitterRange
+	result := base + jitter
+	if result <= 0 {
+		return base
+	}
+	return result
 }
 
 func (m *Manager) doConnect() error {
