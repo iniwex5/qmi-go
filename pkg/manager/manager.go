@@ -3556,6 +3556,23 @@ func (m *Manager) configureNetwork() error {
 		if err != nil {
 			m.log.WithError(err).Warn("Failed to get IPv6 settings")
 		} else {
+			// Merge IPv6 fields into m.settings so Settings() exposes both
+			// families regardless of whether the IPv4 leg is active.
+			// IPv6需要合并进m.settings，这样无论IPv4是否启用，Settings()都能返回双栈信息。
+			m.mu.Lock()
+			if m.settings == nil {
+				m.settings = &qmi.RuntimeSettings{}
+			}
+			m.settings.IPv6Address = settingsV6.IPv6Address
+			m.settings.IPv6Prefix = settingsV6.IPv6Prefix
+			m.settings.IPv6Gateway = settingsV6.IPv6Gateway
+			m.settings.IPv6DNS1 = settingsV6.IPv6DNS1
+			m.settings.IPv6DNS2 = settingsV6.IPv6DNS2
+			if m.settings.MTU == 0 {
+				m.settings.MTU = settingsV6.MTU
+			}
+			m.mu.Unlock()
+
 			if settingsV6.IPv6Address != nil {
 				m.log.Infof("Configuring IPv6: %s/%d", settingsV6.IPv6Address, settingsV6.IPv6Prefix)
 				if err := netcfg.SetIPv6Address(ifname, settingsV6.IPv6Address, int(settingsV6.IPv6Prefix)); err != nil {
