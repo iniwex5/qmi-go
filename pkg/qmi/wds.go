@@ -269,6 +269,9 @@ type CurrentBearerTechnologyInfo struct {
 
 // NewWDSService creates a WDS service wrapper / NewWDSService创建一个WDS服务包装器
 func NewWDSService(client *Client) (*WDSService, error) {
+	if !client.HasService(ServiceWDS) {
+		return nil, ErrServiceNotSupported
+	}
 	return NewWDSServiceWithContext(context.Background(), client)
 }
 
