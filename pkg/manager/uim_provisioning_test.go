@@ -49,6 +49,32 @@ func TestEnsureSIMProvisioned(t *testing.T) {
 		}
 	})
 
+	t.Run("detected stays detected does not thrash rebind", func(t *testing.T) {
+		// 真实场景：激活后卡需要多轮才转 ready，期间持续上报 detected。
+		reads := 0
+		rebinds := 0
+		detectedStuck := UIMReadiness{CardPresent: true, AppState: qmi.UIMAppStateDetected, NeedsProvisioning: true, Reason: UIMReadinessNeedsProvisioning}
+		deps := ensureProvisioningDeps{
+			readiness: func(context.Context) (UIMReadiness, error) {
+				reads++
+				if reads >= 6 { // settle 后终于 ready
+					return UIMReadiness{CardPresent: true, AppState: qmi.UIMAppStateReady, ProvisioningActive: true, UIMReady: true, Reason: UIMReadinessReady}, nil
+				}
+				return detectedStuck, nil
+			},
+			usimAID: func(context.Context) ([]byte, error) { return []byte{0xA0, 0x00}, nil },
+			rebind:  func(context.Context, uint8, []byte) error { rebinds++; return nil },
+			sleep:   func(context.Context, time.Duration) error { return nil },
+		}
+		r, err := ensureSIMProvisioned(context.Background(), EnsureSIMProvisionedOptions{MaxAttempts: 12}, deps)
+		if err != nil || !r.UIMReady {
+			t.Fatalf("expected eventual ready: r=%+v err=%v", r, err)
+		}
+		if rebinds > 2 {
+			t.Fatalf("rebind thrash: expected <=2 activations across stuck-detected polls, got %d", rebinds)
+		}
+	})
+
 	t.Run("absent is no-op", func(t *testing.T) {
 		rebinds := 0
 		deps := ensureProvisioningDeps{

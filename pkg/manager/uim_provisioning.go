@@ -14,6 +14,8 @@ type EnsureSIMProvisionedOptions struct {
 	PollInterval            time.Duration
 	MaxAttempts             int
 	UnknownAppStateBackstop int
+	MaxActivations          int           // 整个调用内最多激活次数（含 deactivate→activate）
+	ActivationSettle        time.Duration // 一次激活后留给卡收敛的观察等待
 }
 
 func normalizeEnsureSIMProvisionedOptions(o EnsureSIMProvisionedOptions) EnsureSIMProvisionedOptions {
@@ -28,6 +30,12 @@ func normalizeEnsureSIMProvisionedOptions(o EnsureSIMProvisionedOptions) EnsureS
 	}
 	if o.UnknownAppStateBackstop <= 0 {
 		o.UnknownAppStateBackstop = 3
+	}
+	if o.MaxActivations <= 0 {
+		o.MaxActivations = 2
+	}
+	if o.ActivationSettle <= 0 {
+		o.ActivationSettle = 2 * time.Second
 	}
 	return o
 }
@@ -55,6 +63,7 @@ func ensureSIMProvisioned(ctx context.Context, opts EnsureSIMProvisionedOptions,
 	opts = normalizeEnsureSIMProvisionedOptions(opts)
 	var last UIMReadiness
 	unknownStreak := 0
+	activations := 0
 
 	for attempt := 1; attempt <= opts.MaxAttempts; attempt++ {
 		r, err := deps.readiness(ctx)
@@ -69,23 +78,23 @@ func ensureSIMProvisioned(ctx context.Context, opts EnsureSIMProvisionedOptions,
 		switch r.Reason {
 		case UIMReadinessCardAbsent, UIMReadinessSIMBlocked,
 			UIMReadinessTransportFatal, UIMReadinessControlUnavailable:
-			return r, nil // 非 provisioning 问题，交回调用方处理。
+			return r, nil
 		}
 
-		activate := false
+		wantActivate := false
 		switch {
 		case r.NeedsProvisioning:
-			activate = true
+			wantActivate = true
 			unknownStreak = 0
 		case r.AppState == qmi.UIMAppStateUnknown:
 			unknownStreak++
 			if unknownStreak >= opts.UnknownAppStateBackstop {
-				activate = true
-				unknownStreak = 0
+				wantActivate = true
 			}
 		}
 
-		if activate {
+		// 仅在仍有激活预算时激活；激活后进入更长的 settle 观察，期间不再重绑。
+		if wantActivate && activations < opts.MaxActivations {
 			aid, aidErr := deps.usimAID(ctx)
 			if aidErr != nil || len(aid) == 0 {
 				// 非致命：读不到 AID，降级为旧行为，继续轮询。
@@ -94,7 +103,16 @@ func ensureSIMProvisioned(ctx context.Context, opts EnsureSIMProvisionedOptions,
 				if errors.As(rbErr, &nse) {
 					return r, nil // 模组自管理 provisioning，停止尝试。
 				}
-				// 其他错误非致命，留在 attempt 预算内继续。
+				// 其他错误非致命，留在预算内继续。
+			} else {
+				activations++
+				unknownStreak = 0
+				if attempt < opts.MaxAttempts {
+					if slErr := deps.sleep(ctx, opts.ActivationSettle); slErr != nil {
+						return last, slErr
+					}
+				}
+				continue // settle 后直接进入下一轮复查，不落普通 poll。
 			}
 		}
 
@@ -104,5 +122,5 @@ func ensureSIMProvisioned(ctx context.Context, opts EnsureSIMProvisionedOptions,
 			}
 		}
 	}
-	return last, nil // best-effort 穷尽：非致命，由调用方的 ready 门控兜底。
+	return last, nil
 }
