@@ -136,4 +136,26 @@ func TestEnsureSIMProvisioned(t *testing.T) {
 			t.Fatalf("transport error must propagate, got %v", err)
 		}
 	})
+
+	t.Run("rebind transient error exhausts activation budget", func(t *testing.T) {
+		// 若 rebind 持续返回非 NotSupported 错误，计数仍消耗预算，不会无限重试。
+		rebinds := 0
+		transientErr := errors.New("qmi: device busy")
+		deps := ensureProvisioningDeps{
+			readiness: func(context.Context) (UIMReadiness, error) { return detected, nil },
+			usimAID:   func(context.Context) ([]byte, error) { return []byte{0xA0, 0x00}, nil },
+			rebind:    func(context.Context, uint8, []byte) error { rebinds++; return transientErr },
+			sleep:     func(context.Context, time.Duration) error { return nil },
+		}
+		_, err := ensureSIMProvisioned(context.Background(), EnsureSIMProvisionedOptions{
+			MaxAttempts:    10,
+			MaxActivations: 2,
+		}, deps)
+		if err != nil {
+			t.Fatalf("transient rebind error should be non-fatal: err=%v", err)
+		}
+		if rebinds > 2 {
+			t.Fatalf("transient rebind errors must be bounded by MaxActivations=2, got %d rebinds", rebinds)
+		}
+	})
 }

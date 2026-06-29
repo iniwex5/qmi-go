@@ -98,21 +98,24 @@ func ensureSIMProvisioned(ctx context.Context, opts EnsureSIMProvisionedOptions,
 			aid, aidErr := deps.usimAID(ctx)
 			if aidErr != nil || len(aid) == 0 {
 				// 非致命：读不到 AID，降级为旧行为，继续轮询。
-			} else if rbErr := deps.rebind(ctx, resolveUIMReloadSlot(r, opts.DefaultSlot), aid); rbErr != nil {
-				var nse *qmi.NotSupportedError
-				if errors.As(rbErr, &nse) {
-					return r, nil // 模组自管理 provisioning，停止尝试。
-				}
-				// 其他错误非致命，留在预算内继续。
 			} else {
+				// 无论 rebind 成败均消耗预算，防止瞬时错误导致抖动重绑。
 				activations++
-				unknownStreak = 0
-				if attempt < opts.MaxAttempts {
-					if slErr := deps.sleep(ctx, opts.ActivationSettle); slErr != nil {
-						return last, slErr
+				if rbErr := deps.rebind(ctx, resolveUIMReloadSlot(r, opts.DefaultSlot), aid); rbErr != nil {
+					var nse *qmi.NotSupportedError
+					if errors.As(rbErr, &nse) {
+						return r, nil // 模组自管理 provisioning，停止尝试。
 					}
+					// 其他瞬时错误：预算已消耗，回落普通 poll 继续等待。
+				} else {
+					unknownStreak = 0
+					if attempt < opts.MaxAttempts {
+						if slErr := deps.sleep(ctx, opts.ActivationSettle); slErr != nil {
+							return last, slErr
+						}
+					}
+					continue // settle 后直接进入下一轮复查，不落普通 poll。
 				}
-				continue // settle 后直接进入下一轮复查，不落普通 poll。
 			}
 		}
 
