@@ -1,6 +1,6 @@
-# quectel-qmi-go
+# qmi-go
 
-`quectel-qmi-go` 是一个面向 Linux 的纯 Go QMI 库和连接管理器，主要用于 Quectel/Qualcomm 蜂窝模组。
+`qmi-go` 是一个面向 Linux 的纯 Go QMI 库和连接管理器，主要用于 Quectel/Qualcomm 蜂窝模组。
 
 它的定位不是“包一层 AT 命令”，而是直接围绕 `/dev/cdc-wdm*` 上的 QMI/QMUX 做协议栈、设备发现、拨号管理、短信、IMS 和 VOICE 能力封装。
 
@@ -50,7 +50,7 @@
 ## 目录结构
 
 ```text
-quectel-qmi-go/
+qmi-go/
 ├── cmd/
 │   ├── cm/         # 主连接管理 CLI
 │   ├── dms-tool/   # DMS 调试
@@ -79,8 +79,8 @@ quectel-qmi-go/
 ## 编译
 
 ```bash
-cd /root/ec20/quectel-qmi-go
-go build -o quectel-qmi-go ./cmd/cm
+cd /root/ec20/qmi-go
+go build -o qmi-go ./cmd/cm
 ```
 
 ## CLI 快速开始
@@ -89,25 +89,25 @@ go build -o quectel-qmi-go ./cmd/cm
 
 ```bash
 # 默认自动发现第一个模组，双栈拨号
-sudo ./quectel-qmi-go -s internet
+sudo ./qmi-go -s internet
 
 # 指定网络接口
-sudo ./quectel-qmi-go -i wwan0 -s internet
+sudo ./qmi-go -i wwan0 -s internet
 
 # 指定控制节点
-sudo ./quectel-qmi-go -d /dev/cdc-wdm0 -s internet
+sudo ./qmi-go -d /dev/cdc-wdm0 -s internet
 
 # 带认证
-sudo ./quectel-qmi-go -s myapn -u user -p pass -a 1
+sudo ./qmi-go -s myapn -u user -p pass -a 1
 
 # 仅 IPv4
-sudo ./quectel-qmi-go -s internet -4
+sudo ./qmi-go -s internet -4
 
 # 仅 IPv6
-sudo ./quectel-qmi-go -s internet -6
+sudo ./qmi-go -s internet -6
 
 # 指定 ProfileIndex 和 MuxID，发起 QMAP 多路拨号
-sudo ./quectel-qmi-go -s ims -n 2 -m 2
+sudo ./qmi-go -s ims -n 2 -m 2
 ```
 
 ### 常用参数
@@ -147,9 +147,9 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/iniwex5/quectel-qmi-go/pkg/device"
-	"github.com/iniwex5/quectel-qmi-go/pkg/manager"
-	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
+	"github.com/iniwex5/qmi-go/pkg/device"
+	"github.com/iniwex5/qmi-go/pkg/manager"
+	"github.com/iniwex5/qmi-go/pkg/qmi"
 )
 
 func main() {
@@ -207,7 +207,7 @@ fmt.Println(manufacturer, model, serving.RegistrationState)
 ### 3. 短信示例
 
 ```go
-if err := mgr.SendSMS("+8613800138000", "hello from quectel-qmi-go"); err != nil {
+if err := mgr.SendSMS("+8613800138000", "hello from qmi-go"); err != nil {
 	log.Fatal(err)
 }
 
@@ -307,7 +307,7 @@ mgr.OnVoiceUSSD(func(info *qmi.VoiceUSSDIndication) {
 ## 开发说明
 
 ```bash
-cd /root/ec20/quectel-qmi-go
+cd /root/ec20/qmi-go
 go test ./...
 ```
 
@@ -315,7 +315,7 @@ go test ./...
 
 ## 备注
 
-- 当前库名已经统一为 `quectel-qmi-go`
+- 当前库名已经统一为 `qmi-go`
 - 如果你是在从旧的 `quectel-cm-go` 迁移，重点检查：
   - `go.mod` 里的模块路径
   - 项目中的 import 路径

@@ -3,7 +3,7 @@ package manager
 import (
 	"testing"
 
-	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
+	"github.com/iniwex5/qmi-go/pkg/qmi"
 )
 
 func TestShouldLogRawIndicationSuppressesRoutineUIMSessionClosed(t *testing.T) {

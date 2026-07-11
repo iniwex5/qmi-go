@@ -1,4 +1,4 @@
-module github.com/iniwex5/quectel-qmi-go
+module github.com/iniwex5/qmi-go
 
 go 1.24.0
 

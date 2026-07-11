@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
+	"github.com/iniwex5/qmi-go/pkg/qmi"
 )
 
 func TestResolveUIMReloadSlotUsesActiveSlot(t *testing.T) {
