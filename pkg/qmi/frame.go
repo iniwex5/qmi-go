@@ -97,6 +97,8 @@ const (
 	NASGetNetworkTime            uint16 = 0x007D // QMINAS_GET_NETWORK_TIME_REQ
 	NASIncrementalNetworkScan    uint16 = 0x0085 // QMINAS_INCREMENTAL_NETWORK_SCAN_REQ
 	NASIncrementalNetworkScanInd uint16 = 0x0085 // QMINAS_INCREMENTAL_NETWORK_SCAN_IND
+	NASGetTxRxInfo               uint16 = 0x005A // Get Tx Rx Info
+	NASGetLTECphyCAInfo          uint16 = 0x00AC // Get LTE Cphy CA Info
 )
 
 // ============================================================================

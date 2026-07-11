@@ -1679,3 +1679,164 @@ func decodeBCDPLMN(plmn []byte) (string, string) {
 	}
 	return mcc, fmt.Sprintf("%d%d%d", mnc1, mnc2, mnc3)
 }
+
+// ============================================================================
+// Additions for LTE Cphy CA Info and Tx Rx Info
+// ============================================================================
+
+type NASPhyCAPCellInfo struct {
+	PhysicalCellID uint16
+	RxChannel      uint16
+	DLBandwidth    uint32
+	LTEBand        uint16
+}
+
+type NASPhyCASCellInfo struct {
+	PhysicalCellID uint16
+	RxChannel      uint16
+	DLBandwidth    uint32
+	LTEBand        uint16
+	State          uint32
+	CellIndex      uint8 // Only available in array TLV (0x15)
+}
+
+type NASLTECphyCAInfo struct {
+	DLBandwidth uint32
+	HasPCell    bool
+	PCell       NASPhyCAPCellInfo
+	SCellIndex  uint8
+	SCells      []NASPhyCASCellInfo
+}
+
+// GetLTECphyCAInfo retrieves the LTE Carrier Aggregation information.
+func (n *NASService) GetLTECphyCAInfo(ctx context.Context) (*NASLTECphyCAInfo, error) {
+	resp, err := n.client.SendRequest(ctx, ServiceNAS, n.clientID, NASGetLTECphyCAInfo, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := resp.CheckResult(); err != nil {
+		return nil, fmt.Errorf("get LTE cphy CA info failed: %w", err)
+	}
+
+	info := &NASLTECphyCAInfo{}
+	
+	if tlv := FindTLV(resp.TLVs, 0x11); tlv != nil && len(tlv.Value) == 4 {
+		info.DLBandwidth = binary.LittleEndian.Uint32(tlv.Value)
+	}
+
+	if tlv := FindTLV(resp.TLVs, 0x13); tlv != nil && len(tlv.Value) == 10 {
+		info.HasPCell = true
+		info.PCell.PhysicalCellID = binary.LittleEndian.Uint16(tlv.Value[0:2])
+		info.PCell.RxChannel = binary.LittleEndian.Uint16(tlv.Value[2:4])
+		info.PCell.DLBandwidth = binary.LittleEndian.Uint32(tlv.Value[4:8])
+		info.PCell.LTEBand = binary.LittleEndian.Uint16(tlv.Value[8:10])
+	}
+
+	if tlv := FindTLV(resp.TLVs, 0x14); tlv != nil && len(tlv.Value) == 1 {
+		info.SCellIndex = tlv.Value[0]
+	}
+
+	// Try the new array TLV first (0x15)
+	if tlv := FindTLV(resp.TLVs, 0x15); tlv != nil && len(tlv.Value) >= 1 {
+		count := int(tlv.Value[0])
+		offset := 1
+		for i := 0; i < count; i++ {
+			if offset+15 > len(tlv.Value) {
+				break
+			}
+			scell := NASPhyCASCellInfo{
+				PhysicalCellID: binary.LittleEndian.Uint16(tlv.Value[offset : offset+2]),
+				RxChannel:      binary.LittleEndian.Uint16(tlv.Value[offset+2 : offset+4]),
+				DLBandwidth:    binary.LittleEndian.Uint32(tlv.Value[offset+4 : offset+8]),
+				LTEBand:        binary.LittleEndian.Uint16(tlv.Value[offset+8 : offset+10]),
+				State:          binary.LittleEndian.Uint32(tlv.Value[offset+10 : offset+14]),
+				CellIndex:      tlv.Value[offset+14],
+			}
+			info.SCells = append(info.SCells, scell)
+			offset += 15
+		}
+	} else if tlv := FindTLV(resp.TLVs, 0x12); tlv != nil && len(tlv.Value) == 14 {
+		// Fallback to older single SCell TLV (0x12)
+		scell := NASPhyCASCellInfo{
+			PhysicalCellID: binary.LittleEndian.Uint16(tlv.Value[0:2]),
+			RxChannel:      binary.LittleEndian.Uint16(tlv.Value[2:4]),
+			DLBandwidth:    binary.LittleEndian.Uint32(tlv.Value[4:8]),
+			LTEBand:        binary.LittleEndian.Uint16(tlv.Value[8:10]),
+			State:          binary.LittleEndian.Uint32(tlv.Value[10:14]),
+			CellIndex:      info.SCellIndex,
+		}
+		info.SCells = append(info.SCells, scell)
+	}
+
+	return info, nil
+}
+
+type NASTxRxChainInfo struct {
+	IsRadioTuned bool
+	RxPower      int32
+	ECIO         int32
+	RSCP         int32
+	RSRP         int32
+	Phase        uint32
+}
+
+type NASTxInfo struct {
+	IsInTraffic bool
+	TxPower     int32
+}
+
+type NASTxRxInfo struct {
+	HasRxChain0 bool
+	RxChain0    NASTxRxChainInfo
+	HasRxChain1 bool
+	RxChain1    NASTxRxChainInfo
+	HasRxChain2 bool
+	RxChain2    NASTxRxChainInfo
+	HasRxChain3 bool
+	RxChain3    NASTxRxChainInfo
+	HasTx       bool
+	Tx          NASTxInfo
+}
+
+// GetTxRxInfo retrieves Tx and Rx power info. radioInterface specifies the RAT (e.g. 0x08 for LTE).
+func (n *NASService) GetTxRxInfo(ctx context.Context, radioInterface uint8) (*NASTxRxInfo, error) {
+	reqTLVs := []TLV{
+		NewTLVUint8(0x01, radioInterface),
+	}
+	resp, err := n.client.SendRequest(ctx, ServiceNAS, n.clientID, NASGetTxRxInfo, reqTLVs)
+	if err != nil {
+		return nil, err
+	}
+	if err := resp.CheckResult(); err != nil {
+		return nil, fmt.Errorf("get tx rx info failed: %w", err)
+	}
+
+	info := &NASTxRxInfo{}
+
+	parseChain := func(tlv *TLV) (NASTxRxChainInfo, bool) {
+		if tlv == nil || len(tlv.Value) < 21 {
+			return NASTxRxChainInfo{}, false
+		}
+		return NASTxRxChainInfo{
+			IsRadioTuned: tlv.Value[0] != 0,
+			RxPower:      int32(binary.LittleEndian.Uint32(tlv.Value[1:5])),
+			ECIO:         int32(binary.LittleEndian.Uint32(tlv.Value[5:9])),
+			RSCP:         int32(binary.LittleEndian.Uint32(tlv.Value[9:13])),
+			RSRP:         int32(binary.LittleEndian.Uint32(tlv.Value[13:17])),
+			Phase:        binary.LittleEndian.Uint32(tlv.Value[17:21]),
+		}, true
+	}
+
+	info.RxChain0, info.HasRxChain0 = parseChain(FindTLV(resp.TLVs, 0x10))
+	info.RxChain1, info.HasRxChain1 = parseChain(FindTLV(resp.TLVs, 0x11))
+	info.RxChain2, info.HasRxChain2 = parseChain(FindTLV(resp.TLVs, 0x15))
+	info.RxChain3, info.HasRxChain3 = parseChain(FindTLV(resp.TLVs, 0x16))
+
+	if tlv := FindTLV(resp.TLVs, 0x12); tlv != nil && len(tlv.Value) >= 5 {
+		info.HasTx = true
+		info.Tx.IsInTraffic = tlv.Value[0] != 0
+		info.Tx.TxPower = int32(binary.LittleEndian.Uint32(tlv.Value[1:5]))
+	}
+
+	return info, nil
+}

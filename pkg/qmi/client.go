@@ -327,7 +327,7 @@ func NewClientWithOptions(ctx context.Context, path string, opts ClientOptions) 
 		} else {
 			c.serviceVersions = ServiceVersionMap(versions)
 			c.versionQueried = true
-			c.logf(ClientLogLevelDebug, "QMI: modem 支持 %d 个 QMI 服务", len(versions))
+			c.logf(ClientLogLevelDebug, "QMI: modem supports %d QMI services", len(versions))
 		}
 	}
 
