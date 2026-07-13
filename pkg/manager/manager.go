@@ -2134,10 +2134,14 @@ func (m *Manager) RotateIP() error {
 	ctx, cancel := m.opContext(m.cfg.Timeouts.Dial)
 	defer cancel()
 
-	// 1. Disconnect data call / 1. 断开数据呼叫
+	// 1. Disconnect data call(s) / 1. 断开数据呼叫
 	if m.handleV4 != 0 && m.wds != nil {
 		_ = m.wds.StopNetworkInterface(ctx, m.handleV4)
 		m.handleV4 = 0
+	}
+	if m.handleV6 != 0 && m.wdsV6 != nil {
+		_ = m.wdsV6.StopNetworkInterface(ctx, m.handleV6)
+		m.handleV6 = 0
 	}
 
 	// Flush old addresses to avoid duplicates / 清除旧地址以避免重复
@@ -2159,6 +2163,9 @@ func (m *Manager) RotateIP() error {
 		return m.rotateViaRadioReset()
 	}
 	m.handleV4 = handle
+
+	// Redial IPv6 alongside IPv4 so the v6 bearer isn't left permanently down / 与 IPv4 一起重拨 IPv6，避免 v6 承载永久丢失
+	m.redialIPv6(ctx)
 
 	// 4. Reconfigure network / 4. 重新配置网络
 	if err := m.configureNetwork(); err != nil {
@@ -2201,10 +2208,14 @@ func (m *Manager) rotateViaRadioReset() error {
 		oldIP = m.settings.IPv4Address.String()
 	}
 
-	// 1. Disconnect current call / 1. 断开当前呼叫
+	// 1. Disconnect current call(s) / 1. 断开当前呼叫
 	if m.handleV4 != 0 && m.wds != nil {
 		m.wds.StopNetworkInterface(ctx, m.handleV4)
 		m.handleV4 = 0
+	}
+	if m.handleV6 != 0 && m.wdsV6 != nil {
+		m.wdsV6.StopNetworkInterface(ctx, m.handleV6)
+		m.handleV6 = 0
 	}
 
 	// Flush old addresses / 2. 清除旧地址
@@ -2267,6 +2278,9 @@ registered:
 	}
 	m.handleV4 = handle
 
+	// Redial IPv6 alongside IPv4 so the v6 bearer isn't left permanently down / 与 IPv4 一起重拨 IPv6，避免 v6 承载永久丢失
+	m.redialIPv6(ctx)
+
 	// 6. Reconfigure network / 7. 重新配置网络
 	if err := m.configureNetwork(); err != nil {
 		return err
@@ -2291,6 +2305,29 @@ registered:
 	})
 
 	return nil
+}
+
+// redialIPv6 stops any stale IPv6 handle and starts a fresh IPv6 data call.
+// It is best-effort: failures are logged but don't fail the caller, matching
+// the existing "IPv4 is primary, IPv6 continues on a best-effort basis" behavior in doConnect.
+// redialIPv6 停止陈旧的 IPv6 handle 并重新拨号 IPv6，失败时仅记录日志，不影响调用方（与 doConnect 中 IPv4 为主、IPv6 尽力而为的行为一致）
+func (m *Manager) redialIPv6(ctx context.Context) {
+	if !m.cfg.EnableIPv6 || m.wdsV6 == nil {
+		return
+	}
+	if m.handleV6 != 0 {
+		_ = m.wdsV6.StopNetworkInterface(ctx, m.handleV6)
+		m.handleV6 = 0
+	}
+	handle, err := m.wdsV6.StartNetworkInterface(ctx,
+		m.cfg.APN, m.cfg.Username, m.cfg.Password,
+		m.cfg.AuthType, qmi.IpFamilyV6)
+	if err != nil {
+		m.log.WithError(err).Warn("IPv6 redial failed during IP rotation")
+		return
+	}
+	m.handleV6 = handle
+	m.log.Infof("IPv6 redialed, handle=0x%08x", handle)
 }
 
 // ============================================================================

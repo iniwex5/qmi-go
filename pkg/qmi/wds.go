@@ -39,6 +39,11 @@ const (
 	TLVWDSPrimaryDNSv6   uint8 = 0x27
 	TLVWDSSecondaryDNSv6 uint8 = 0x28
 	TLVWDSMtu            uint8 = 0x29
+	// TLVWDSIPv6DelegatedPrefix is a vendor extension TLV (observed on Quectel
+	// modules) carrying the IPv6 prefix delegated to the CPE, in addition to
+	// the WWAN-facing address in TLVWDSIPv6Address.
+	// TLVWDSIPv6DelegatedPrefix 是厂商扩展 TLV（在 Quectel 模组上观察到），携带委派给 CPE 的 IPv6 前缀，与 TLVWDSIPv6Address 中的 WWAN 侧地址不同。
+	TLVWDSIPv6DelegatedPrefix uint8 = 0x57
 )
 
 // Runtime settings mask bits / 运行时设置掩码位
@@ -457,7 +462,13 @@ type RuntimeSettings struct {
 	IPv6Gateway net.IP
 	IPv6DNS1    net.IP
 	IPv6DNS2    net.IP
-	MTU         int
+	// IPv6DelegatedPrefix / IPv6DelegatedPrefixLen carry the DHCPv6-PD prefix
+	// delegated to the CPE for downstream (LAN-side) subnetting, distinct from
+	// IPv6Address/IPv6Prefix which describe the WWAN interface address.
+	// IPv6DelegatedPrefix / IPv6DelegatedPrefixLen 携带委派给 CPE 用于下游（LAN 侧）划分子网的 DHCPv6-PD 前缀，与描述 WWAN 接口地址的 IPv6Address/IPv6Prefix 不同。
+	IPv6DelegatedPrefix    net.IP
+	IPv6DelegatedPrefixLen int
+	MTU                    int
 }
 
 func parsePacketServiceStatusPacket(packet *Packet, checkResult bool) (ConnectionStatus, error) {
@@ -477,6 +488,41 @@ func parsePacketServiceStatusPacket(packet *Packet, checkResult bool) (Connectio
 	}
 
 	return ConnectionStatus(statusTLV.Value[0]), nil
+}
+
+// parseIPv6DelegatedPrefixAddress decodes the 16-byte address portion of
+// TLVWDSIPv6DelegatedPrefix. Unlike TLVWDSIPv6Address/Gateway (transmitted as
+// plain network-order bytes), this vendor TLV has been observed to encode the
+// prefix as a sequence of 16-bit words in host (little-endian) order. We
+// decode both interpretations and keep whichever looks like a plausible
+// delegated prefix (global unicast 2000::/3 or unique-local fc00::/7);
+// network order is the default/fallback since it matches every other IPv6
+// TLV in this response.
+// parseIPv6DelegatedPrefixAddress 解析 TLVWDSIPv6DelegatedPrefix 的 16 字节地址部分。
+// 与按纯网络字节序传输的 TLVWDSIPv6Address/Gateway 不同，该厂商扩展 TLV 在实测中曾以主机（小端）
+// 16 位字序编码前缀。这里同时按两种字节序解析，保留看起来更像合法委派前缀的一个
+// （全局单播 2000::/3 或唯一本地 fc00::/7）；网络字节序作为默认/回退值，因为它与响应中其他 IPv6 TLV 一致。
+func parseIPv6DelegatedPrefixAddress(raw []byte) net.IP {
+	networkOrder := make(net.IP, 16)
+	copy(networkOrder, raw)
+
+	swapped := make(net.IP, 16)
+	for i := 0; i < 16; i += 2 {
+		swapped[i] = raw[i+1]
+		swapped[i+1] = raw[i]
+	}
+
+	if looksLikeDelegatedPrefix(networkOrder) {
+		return networkOrder
+	}
+	if looksLikeDelegatedPrefix(swapped) {
+		return swapped
+	}
+	return networkOrder
+}
+
+func looksLikeDelegatedPrefix(ip net.IP) bool {
+	return ip[0]&0xE0 == 0x20 || ip[0]&0xFE == 0xFC
 }
 
 // GetRuntimeSettings retrieves IP configuration / GetRuntimeSettings检索IP配置
@@ -534,6 +580,10 @@ func (w *WDSService) GetRuntimeSettings(ctx context.Context, ipFamily uint8) (*R
 	}
 	if tlv := FindTLV(resp.TLVs, TLVWDSSecondaryDNSv6); tlv != nil && len(tlv.Value) >= 16 {
 		settings.IPv6DNS2 = net.IP(tlv.Value[0:16])
+	}
+	if tlv := FindTLV(resp.TLVs, TLVWDSIPv6DelegatedPrefix); tlv != nil && len(tlv.Value) >= 17 {
+		settings.IPv6DelegatedPrefix = parseIPv6DelegatedPrefixAddress(tlv.Value[0:16])
+		settings.IPv6DelegatedPrefixLen = int(tlv.Value[16])
 	}
 
 	// MTU
