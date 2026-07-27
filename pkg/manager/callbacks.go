@@ -42,6 +42,7 @@ const (
 	EventNASSignalInfoChanged                                   // NAS signal info changed indication / NAS 信号信息变化指示
 	EventNASNetworkReject                                       // NAS network reject indication / NAS 驻网拒绝指示
 	EventNASIncrementalNetworkScan                              // NAS incremental network scan indication / NAS 增量搜网指示
+	EventNASCellLocationInfoChanged                             // NAS cell location info changed indication / NAS Cell Location Info 变化指示
 	EventModemReset                                             // Modem reset indication / Modem 重置指示
 	EventSimStatusChanged                                       // SIM status changed indication / SIM 状态改变指示
 	EventUIMSessionClosed                                       // UIM session closed indication / UIM 会话关闭指示
@@ -107,6 +108,8 @@ func (e EventType) String() string {
 		return "NASNetworkReject"
 	case EventNASIncrementalNetworkScan:
 		return "NASIncrementalNetworkScan"
+	case EventNASCellLocationInfoChanged:
+		return "NASCellLocationInfoChanged"
 	case EventNASEventReport:
 		return "NASEventReport"
 	case EventModemReset:
@@ -155,6 +158,7 @@ type Event struct {
 	NASSignalInfo             *qmi.SignalInfo                                 // NAS signal info / NAS 信号详情
 	NASNetworkReject          *qmi.NASNetworkRejectInfo                       // NAS network reject / NAS 驻网拒绝
 	NASIncrementalNetwork     *qmi.NASIncrementalNetworkScanInfo              // NAS incremental scan / NAS 增量搜网
+	NASCellLocationInfo       *qmi.CellLocationInfo                           // NAS cell location info / NAS Cell Location Info(服务/邻区)
 	PacketServiceStatus       qmi.ConnectionStatus                            // WDS packet service status / WDS 数据服务状态
 	UIMRefresh                *qmi.UIMRefreshIndication                       // UIM refresh indication payload / UIM 刷新指示载荷
 	UIMSlotStatus             *qmi.UIMSlotStatus                              // UIM slot status indication payload / UIM 卡槽状态指示载荷
@@ -411,6 +415,47 @@ func cloneNASIncrementalNetworkScanInfo(in *qmi.NASIncrementalNetworkScanInfo) *
 	return &out
 }
 
+// cloneNASCellLocationInfoForEvent produces an independent copy of a
+// CellLocationInfo snapshot so subscribers cannot mutate the manager's
+// internal state.
+func cloneNASCellLocationInfoForEvent(in *qmi.CellLocationInfo) *qmi.CellLocationInfo {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if in.GERAN != nil {
+		g := *in.GERAN
+		out.GERAN = &g
+	}
+	if in.UMTS != nil {
+		u := *in.UMTS
+		out.UMTS = &u
+	}
+	if in.LTE != nil {
+		l := *in.LTE
+		if len(in.LTE.IntraFrequencyNeighbors) > 0 {
+			l.IntraFrequencyNeighbors = append([]qmi.LTECellNeighbor(nil), in.LTE.IntraFrequencyNeighbors...)
+		}
+		if len(in.LTE.InterFrequencyNeighbors) > 0 {
+			inter := make([]qmi.LTECellInterFrequency, len(in.LTE.InterFrequencyNeighbors))
+			for i, freq := range in.LTE.InterFrequencyNeighbors {
+				cf := freq
+				if len(freq.Neighbors) > 0 {
+					cf.Neighbors = append([]qmi.LTECellNeighbor(nil), freq.Neighbors...)
+				}
+				inter[i] = cf
+			}
+			l.InterFrequencyNeighbors = inter
+		}
+		out.LTE = &l
+	}
+	if in.NR5G != nil {
+		n := *in.NR5G
+		out.NR5G = &n
+	}
+	return &out
+}
+
 func cloneUIMRefreshFiles(in []qmi.UIMRefreshFile) []qmi.UIMRefreshFile {
 	if len(in) == 0 {
 		return nil
@@ -486,6 +531,7 @@ func cloneEvent(event Event) Event {
 	out.NASSignalInfo = cloneSignalInfo(event.NASSignalInfo)
 	out.NASNetworkReject = cloneNASNetworkRejectInfo(event.NASNetworkReject)
 	out.NASIncrementalNetwork = cloneNASIncrementalNetworkScanInfo(event.NASIncrementalNetwork)
+	out.NASCellLocationInfo = cloneNASCellLocationInfoForEvent(event.NASCellLocationInfo)
 	out.UIMRefresh = cloneUIMRefreshIndication(event.UIMRefresh)
 	out.UIMSlotStatus = cloneUIMSlotStatus(event.UIMSlotStatus)
 	out.WMSSMSCAddress = cloneWMSSMSCAddress(event.WMSSMSCAddress)
@@ -750,6 +796,17 @@ func (m *Manager) OnNASIncrementalNetworkScan(handler func(info *qmi.NASIncremen
 	m.OnEvent(func(e Event) {
 		if e.Type == EventNASIncrementalNetworkScan && handler != nil {
 			handler(e.NASIncrementalNetwork)
+		}
+	})
+}
+
+// OnNASCellLocationInfoChanged registers a callback for NAS cell-location-info
+// indications pushed by the modem (LTE serving/ neighbor cells, NR5G serving
+// cell, timing advance, inter-frequency entries).
+func (m *Manager) OnNASCellLocationInfoChanged(handler func(info *qmi.CellLocationInfo)) {
+	m.OnEvent(func(e Event) {
+		if e.Type == EventNASCellLocationInfoChanged && handler != nil {
+			handler(e.NASCellLocationInfo)
 		}
 	})
 }

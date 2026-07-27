@@ -23,6 +23,10 @@ func nasTLVUint64(tlvType uint8, v uint64) TLV {
 	return TLV{Type: tlvType, Value: buf}
 }
 
+func nasTLVBytes(tlvType uint8, payload []byte) TLV {
+	return TLV{Type: tlvType, Value: append([]byte(nil), payload...)}
+}
+
 func TestBuildTechnologyPreferenceTLVs(t *testing.T) {
 	tlvs := buildTechnologyPreferenceTLVs(TechnologyPreference{
 		ActivePreference: NASTechPreference3GPP | NASTechPreferenceLTE,
@@ -378,7 +382,7 @@ func TestParseSystemSelectionPreferenceResponse(t *testing.T) {
 
 func TestDecodeBCDPLMN(t *testing.T) {
 	mcc, mnc := decodeBCDPLMN([]byte{0x13, 0x00, 0x62})
-	if mcc != "310" || mnc != "260" {
+	if mcc != "310" || mnc != "026" {
 		t.Fatalf("unexpected 3-digit MNC decode: %s/%s", mcc, mnc)
 	}
 
@@ -424,7 +428,7 @@ func TestParseCellLocationInfoResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseCellLocationInfoResponse returned error: %v", err)
 	}
-	if info.LTE == nil || info.LTE.MCC != "310" || info.LTE.MNC != "260" || info.LTE.TAC != 100 || info.LTE.GlobalCellID != 0x12345678 {
+	if info.LTE == nil || info.LTE.MCC != "310" || info.LTE.MNC != "026" || info.LTE.TAC != 100 || info.LTE.GlobalCellID != 0x12345678 {
 		t.Fatalf("unexpected LTE cell info: %+v", info.LTE)
 	}
 	if !info.LTE.HasTimingAdvance || info.LTE.TimingAdvance != 42 {
@@ -435,6 +439,256 @@ func TestParseCellLocationInfoResponse(t *testing.T) {
 	}
 	if info.NR5G.TAC != 258 || info.NR5G.GlobalCellID != 0x1122334455667788 || info.NR5G.PhysicalCellID != 321 {
 		t.Fatalf("unexpected NR cell info: %+v", info.NR5G)
+	}
+}
+
+// TestParseCellLocationInfoResponse_LTEIntrafreqNeighbors covers TLV 0x13 with
+// at least one intrafrequency neighbor cell appended after the serving-cell
+// header.
+func TestParseCellLocationInfoResponse_LTEIntrafreqNeighbors(t *testing.T) {
+	// Serving header (17 bytes) + cells_len(1) + 1 neighbor (10 bytes) = 29 bytes
+	neighbor := make([]byte, 10)
+	rsrq := int16(-8)
+	rsrp := int16(-90)
+	rssi := int16(-72)
+	rxLevel := int16(23)
+	binary.LittleEndian.PutUint16(neighbor[0:2], 0x0042)
+	binary.LittleEndian.PutUint16(neighbor[2:4], uint16(rsrq))
+	binary.LittleEndian.PutUint16(neighbor[4:6], uint16(rsrp))
+	binary.LittleEndian.PutUint16(neighbor[6:8], uint16(rssi))
+	binary.LittleEndian.PutUint16(neighbor[8:10], uint16(rxLevel))
+	lteValue := append([]byte{
+		0x01,                   // UE in idle
+		0x13, 0x00, 0x62,       // PLMN
+		0x64, 0x00,             // TAC
+		0x78, 0x56, 0x34, 0x12, // GlobalCellID
+		0xA4, 0x01,             // EARFCN
+		0x21, 0x00,             // ServingCellID
+		0x07, 0x08, 0x09, 0x0A, // thresholds
+		0x01,                   // cells_len = 1
+	}, neighbor...)
+
+	resp := &Packet{
+		TLVs: []TLV{
+			successResultTLV(),
+			{Type: 0x13, Value: lteValue},
+		},
+	}
+	info, err := parseCellLocationInfoResponse(resp)
+	if err != nil {
+		t.Fatalf("parseCellLocationInfoResponse error: %v", err)
+	}
+	if info.LTE == nil {
+		t.Fatalf("expected LTE block")
+	}
+	if len(info.LTE.IntraFrequencyNeighbors) != 1 {
+		t.Fatalf("expected 1 intra-frequency neighbor, got %d", len(info.LTE.IntraFrequencyNeighbors))
+	}
+	got := info.LTE.IntraFrequencyNeighbors[0]
+	if got.PhysicalCellID != 0x0042 {
+		t.Fatalf("PhysicalCellID = %d, want 66", got.PhysicalCellID)
+	}
+	if got.RSRQ != -8 || got.RSRP != -90 || got.RSSI != -72 || got.CellSelectionRXLevel != 23 {
+		t.Fatalf("neighbor measurements wrong: %+v", got)
+	}
+}
+
+// TestParseCellLocationInfoResponse_LTEInterfrequency exercises TLV 0x14 with
+// one inter-frequency entry carrying one neighbor cell.
+func TestParseCellLocationInfoResponse_LTEInterfrequency(t *testing.T) {
+	neighbor := make([]byte, 10)
+	ifRSRQ := int16(-10)
+	ifRSRP := int16(-100)
+	ifRSSI := int16(-65)
+	ifRXLevel := int16(11)
+	binary.LittleEndian.PutUint16(neighbor[0:2], 99)
+	binary.LittleEndian.PutUint16(neighbor[2:4], uint16(ifRSRQ))
+	binary.LittleEndian.PutUint16(neighbor[4:6], uint16(ifRSRP))
+	binary.LittleEndian.PutUint16(neighbor[6:8], uint16(ifRSSI))
+	binary.LittleEndian.PutUint16(neighbor[8:10], uint16(ifRXLevel))
+
+	interValue := []byte{
+		0x01,       // UE in idle
+		0x01,       // freqs_len = 1
+		0xEA, 0x04, // EARFCN = 1258
+		0x02, 0x03, // Low/High
+		0x05,       // Priority (ue_in_idle=1)
+		0x01,       // cells_len = 1
+	}
+	interValue = append(interValue, neighbor...)
+
+	resp := &Packet{
+		TLVs: []TLV{
+			successResultTLV(),
+			nasTLVBytes(0x14, interValue),
+		},
+	}
+	info, err := parseCellLocationInfoResponse(resp)
+	if err != nil {
+		t.Fatalf("parseCellLocationInfoResponse error: %v", err)
+	}
+	if info.LTE == nil {
+		t.Fatalf("expected LTE block")
+	}
+	if !info.LTE.UEInIdle {
+		t.Fatalf("UEInIdle should be true")
+	}
+	if len(info.LTE.InterFrequencyNeighbors) != 1 {
+		t.Fatalf("expected 1 inter-frequency entry, got %d", len(info.LTE.InterFrequencyNeighbors))
+	}
+	ifreq := info.LTE.InterFrequencyNeighbors[0]
+	if ifreq.EARFCN != 1258 || ifreq.CellSelectionRXLevelLow != 2 || ifreq.CellSelectionRXLevelHigh != 3 {
+		t.Fatalf("inter-frequency header wrong: %+v", ifreq)
+	}
+	if !ifreq.HasCellReselectionPriority || ifreq.CellReselectionPriority != 5 {
+		t.Fatalf("priority should be set because ue_in_idle=1: %+v", ifreq)
+	}
+	if len(ifreq.Neighbors) != 1 {
+		t.Fatalf("expected 1 neighbor in inter-freq, got %d", len(ifreq.Neighbors))
+	}
+	if ifreq.Neighbors[0].PhysicalCellID != 99 || ifreq.Neighbors[0].RSRP != -100 {
+		t.Fatalf("inter-freq neighbor wrong: %+v", ifreq.Neighbors[0])
+	}
+}
+
+// TestParseCellLocationInfoResponse_AllTLVs combines every TLV the modem may
+// emit (0x10/0x11/0x13 with neighbors/0x14/0x17/0x1E/0x2E/0x2F).
+func TestParseCellLocationInfoResponse_AllTLVs(t *testing.T) {
+	geranValue := make([]byte, 18)
+	binary.LittleEndian.PutUint32(geranValue[0:4], 0x0BADF00D)
+	geranValue[4], geranValue[5], geranValue[6] = 0x13, 0x00, 0x62
+	binary.LittleEndian.PutUint16(geranValue[7:9], 0x1234)
+	binary.LittleEndian.PutUint16(geranValue[9:11], 123)
+	geranValue[11] = 5
+	binary.LittleEndian.PutUint32(geranValue[12:16], 7)
+	binary.LittleEndian.PutUint16(geranValue[16:18], 21)
+
+	umtsValue := make([]byte, 15)
+	binary.LittleEndian.PutUint16(umtsValue[0:2], 0x1234)
+	umtsValue[2], umtsValue[3], umtsValue[4] = 0x13, 0x00, 0x62
+	binary.LittleEndian.PutUint16(umtsValue[5:7], 7)
+	binary.LittleEndian.PutUint16(umtsValue[7:9], 1234)
+	umtsRSCP := int16(-90)
+	umtsECIO := int16(-7)
+	binary.LittleEndian.PutUint16(umtsValue[9:11], 256)
+	binary.LittleEndian.PutUint16(umtsValue[11:13], uint16(umtsRSCP))
+	binary.LittleEndian.PutUint16(umtsValue[13:15], uint16(umtsECIO))
+
+	// LTE serving only — verify it does not depend on neighbor entries.
+	lteValue := []byte{
+		0x00,                   // UE not idle
+		0x13, 0x00, 0x62,       // PLMN
+		0x64, 0x00,             // TAC
+		0x78, 0x56, 0x34, 0x12, // GlobalCellID
+		0xA4, 0x01,             // EARFCN
+		0x21, 0x00,             // ServingCellID
+		0x07, 0x08, 0x09, 0x0A, // thresholds
+		0x00,                   // cells_len = 0
+	}
+
+	nrValue := make([]byte, 22)
+	copy(nrValue[0:3], []byte{0x13, 0x00, 0x62})
+	copy(nrValue[3:6], []byte{0x00, 0x01, 0x02})
+	binary.LittleEndian.PutUint64(nrValue[6:14], 0x1122334455667788)
+	binary.LittleEndian.PutUint16(nrValue[14:16], 321)
+	nrRSRQ := int16(-11)
+	nrRSRP := int16(-95)
+	nrSNR := int16(25)
+	binary.LittleEndian.PutUint16(nrValue[16:18], uint16(nrRSRQ))
+	binary.LittleEndian.PutUint16(nrValue[18:20], uint16(nrRSRP))
+	binary.LittleEndian.PutUint16(nrValue[20:22], uint16(nrSNR))
+
+	resp := &Packet{
+		TLVs: []TLV{
+			successResultTLV(),
+			nasTLVBytes(0x10, geranValue),
+			nasTLVBytes(0x11, umtsValue),
+			nasTLVBytes(0x13, lteValue),
+			nasTLVUint32(0x1E, 0xFFFFFFFF), // unavailable
+			nasTLVUint32(0x2E, 635334),
+			nasTLVBytes(0x2F, nrValue),
+		},
+	}
+	info, err := parseCellLocationInfoResponse(resp)
+	if err != nil {
+		t.Fatalf("parseCellLocationInfoResponse error: %v", err)
+	}
+	if info.GERAN == nil || info.GERAN.CellID != 0x0BADF00D {
+		t.Fatalf("GERAN block missing: %+v", info.GERAN)
+	}
+	if info.UMTS == nil || info.UMTS.CellID != 0x1234 {
+		t.Fatalf("UMTS block missing: %+v", info.UMTS)
+	}
+	if info.LTE == nil {
+		t.Fatalf("LTE block missing")
+	}
+	if info.LTE.HasTimingAdvance {
+		t.Fatalf("TimingAdvance should be marked unavailable when TLV 0x1E = 0xFFFFFFFF")
+	}
+	if info.NR5G == nil || info.NR5G.PhysicalCellID != 321 {
+		t.Fatalf("NR5G block missing: %+v", info.NR5G)
+	}
+}
+
+// TestParseCellLocationInfoIndication parses an indication packet without
+// the result TLV that the response variant expects.
+func TestParseCellLocationInfoIndication(t *testing.T) {
+	lteValue := []byte{
+		0x01,
+		0x13, 0x00, 0x62,
+		0x64, 0x00,
+		0x78, 0x56, 0x34, 0x12,
+		0xA4, 0x01,
+		0x21, 0x00,
+		0x07, 0x08, 0x09, 0x0A,
+		0x00,
+	}
+	packet := &Packet{
+		TLVs: []TLV{
+			nasTLVBytes(0x13, lteValue),
+		},
+	}
+	info, err := ParseCellLocationInfoIndication(packet)
+	if err != nil {
+		t.Fatalf("ParseCellLocationInfoIndication error: %v", err)
+	}
+	if info == nil || info.LTE == nil {
+		t.Fatalf("expected parsed LTE block")
+	}
+	if info.LTE.MCC != "310" || info.LTE.MNC != "026" {
+		t.Fatalf("PLMN mismatch: %s/%s", info.LTE.MCC, info.LTE.MNC)
+	}
+}
+
+// TestParseCellLocationInfoIndication_NilPacket ensures nil packets are
+// rejected by the indication parser.
+func TestParseCellLocationInfoIndication_NilPacket(t *testing.T) {
+	if _, err := ParseCellLocationInfoIndication(nil); err == nil {
+		t.Fatalf("expected error for nil packet")
+	}
+}
+
+// TestDecodeBCDPLMN_SkipFillers exercises the 3GPP BCD encoding rule: when
+// nibble[3] (high nibble of PLMN[1]) equals 0xF the MNC is 2-digit and the
+// filler nibble is omitted, mirroring quectel-CM's str_from_bcd_plmn.
+func TestDecodeBCDPLMN_SkipFillers(t *testing.T) {
+	// nibble[3] = 0xF → 2-digit MNC. PLMN = {0x13, 0xF0, 0x62}
+	// MCC digits: 3, 1, 0  → "310"
+	// MNC digits: 2, 6      → "26"
+	plmn := []byte{0x13, 0xF0, 0x62}
+	mcc, mnc := decodeBCDPLMN(plmn)
+	if mcc != "310" {
+		t.Fatalf("MCC = %q, want \"310\"", mcc)
+	}
+	if mnc != "26" {
+		t.Fatalf("MNC = %q, want \"26\" (2-digit)", mnc)
+	}
+
+	// Standard case: MCC=310, MNC=026 (3-digit MNC because nibble[3] = 0x0).
+	plmnOK := []byte{0x13, 0x00, 0x62}
+	mccOK, mncOK := decodeBCDPLMN(plmnOK)
+	if mccOK != "310" || mncOK != "026" {
+		t.Fatalf("standard decode wrong: %s/%s", mccOK, mncOK)
 	}
 }
 

@@ -224,7 +224,7 @@ func TestHandleIndicationNASSignalInfoChanged(t *testing.T) {
 	})
 
 	info, ts, valid := m.snapshot.NASSignalInfo()
-	if !valid || info == nil || info.LTERSRQ != -9 || info.LTERSRP != -200 || info.NR5GSINR != 30 || ts.IsZero() {
+	if !valid || info == nil || info.LTERSRQ != -9 || info.LTERSRP != -200 || info.NR5GRSRP != -25 || info.NR5GSINR != -9 || ts.IsZero() {
 		t.Fatalf("unexpected nas signal snapshot: valid=%v ts=%v info=%+v", valid, ts, info)
 	}
 }
@@ -565,5 +565,73 @@ func TestSnapshotSignalWriteCopiesInput(t *testing.T) {
 	}
 	if cached.RSSI != -60 {
 		t.Fatalf("expected copied signal RSSI=-60, got %d", cached.RSSI)
+	}
+}
+
+func TestHandleIndicationNASCellLocationInfoChanged(t *testing.T) {
+	m := &Manager{
+		log:     NewNopLogger(),
+		events:  NewEventEmitter(),
+		eventCh: make(chan internalEvent, 1),
+	}
+	lteValue := []byte{
+		0x01,                   // UE in idle
+		0x13, 0x00, 0x62,       // PLMN 310/260
+		0x64, 0x00,             // TAC 100
+		0x78, 0x56, 0x34, 0x12, // GlobalCellID
+		0xA4, 0x01,             // EARFCN
+		0x21, 0x00,             // ServingCellID
+		0x07, 0x08, 0x09, 0x0A, // thresholds
+		0x00,                   // cells_len = 0
+	}
+	m.handleIndication(qmi.Event{
+		Type: qmi.EventNASCellLocationInfoChanged,
+		Packet: &qmi.Packet{TLVs: []qmi.TLV{
+			{Type: 0x13, Value: lteValue},
+		}},
+	})
+
+	info, ts, valid := m.snapshot.NASCellLocationInfo()
+	if !valid || info == nil || ts.IsZero() {
+		t.Fatalf("snapshot not updated: valid=%v ts=%v info=%+v", valid, ts, info)
+	}
+	if info.LTE == nil || info.LTE.MCC != "310" || info.LTE.MNC != "026" {
+		t.Fatalf("unexpected LTE snapshot: %+v", info.LTE)
+	}
+
+	// Emitted event should carry the parsed payload too. The subscriber
+// callback runs on the EventEmitter goroutine; we hand the payload over
+// through a channel so the main test goroutine does not race on the
+// shared variable.
+	gotCh := make(chan *qmi.CellLocationInfo, 1)
+	m.OnNASCellLocationInfoChanged(func(payload *qmi.CellLocationInfo) {
+		gotCh <- payload
+	})
+	m.handleIndication(qmi.Event{
+		Type: qmi.EventNASCellLocationInfoChanged,
+		Packet: &qmi.Packet{TLVs: []qmi.TLV{
+			{Type: 0x13, Value: lteValue},
+		}},
+	})
+	select {
+	case got := <-gotCh:
+		if got == nil || got.LTE == nil {
+			t.Fatalf("subscriber did not receive cell location info")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for NASCellLocationInfoChanged callback")
+	}
+}
+
+func TestSnapshotNASCellLocationInfoReset(t *testing.T) {
+	s := &DeviceSnapshot{}
+	lte := &qmi.LTECellLocationInfo{MCC: "310", MNC: "026"}
+	s.updateNASCellLocationInfo(&qmi.CellLocationInfo{LTE: lte})
+	if _, _, ok := s.NASCellLocationInfo(); !ok {
+		t.Fatalf("expected valid snapshot after update")
+	}
+	s.Reset()
+	if _, _, ok := s.NASCellLocationInfo(); ok {
+		t.Fatalf("expected snapshot to be cleared after Reset")
 	}
 }

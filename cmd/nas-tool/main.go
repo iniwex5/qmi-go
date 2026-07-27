@@ -13,7 +13,7 @@ import (
 
 func main() {
 	devicePath := flag.String("device", defaultQmiDevice(), "Path to QMI device")
-	action := flag.String("action", "all", "Action: all, serving, signal, signal-info, sysinfo, scan, register, dump")
+	action := flag.String("action", "all", "Action: all, serving, signal, signal-info, sysinfo, scan, register, cell-info, dump")
 	useQRTR := flag.Bool("qrtr", false, "Use native QRTR (AF_QIPCRTR) transport instead of a cdc-wdm device")
 	flag.Parse()
 
@@ -40,6 +40,7 @@ func main() {
 		runSignalInfo(ctx, nas)
 		runSysInfo(ctx, nas)
 		runScan(nas)
+		runCellLocationInfo(ctx, nas)
 	case "serving":
 		runServing(ctx, nas)
 	case "signal":
@@ -52,6 +53,8 @@ func main() {
 		runScan(nas)
 	case "register":
 		runRegister(nas)
+	case "cell-info":
+		runCellLocationInfo(ctx, nas)
 	case "dump":
 		runDump(ctx, client, nas)
 	default:
@@ -143,6 +146,77 @@ func runScan(nas *qmi.NASService) {
 	fmt.Println()
 }
 
+func runCellLocationInfo(ctx context.Context, nas *qmi.NASService) {
+	fmt.Println("=== NAS Cell Location Info ===")
+	info, err := nas.GetCellLocationInfo(ctx)
+	if err != nil {
+		log.Printf("GetCellLocationInfo failed: %v", err)
+		return
+	}
+
+	if info.LTE != nil {
+		fmt.Println("LTE serving:")
+		fmt.Printf("  UE in idle: %v\n", info.LTE.UEInIdle)
+		fmt.Printf("  PLMN: %s-%s\n", info.LTE.MCC, info.LTE.MNC)
+		fmt.Printf("  TAC: %d  GlobalCellID: %d (0x%x)\n", info.LTE.TAC, info.LTE.GlobalCellID, info.LTE.GlobalCellID)
+		fmt.Printf("  EARFCN: %d  ServingCellID: %d\n", info.LTE.EARFCN, info.LTE.ServingCellID)
+		fmt.Printf("  CellReselectionPriority: %d\n", info.LTE.CellReselectionPriority)
+		if info.LTE.HasIdleThresholds {
+			fmt.Printf("  Snonintra/ServingLow/Sintra: %d/%d/%d\n",
+				info.LTE.SNonIntraSearchThreshold,
+				info.LTE.ServingCellLowThreshold,
+				info.LTE.SIntraSearchThreshold)
+		}
+		if info.LTE.HasTimingAdvance {
+			fmt.Printf("  TimingAdvance: %d\n", info.LTE.TimingAdvance)
+		}
+		if len(info.LTE.IntraFrequencyNeighbors) > 0 {
+			fmt.Printf("  Intra-frequency neighbors (%d):\n", len(info.LTE.IntraFrequencyNeighbors))
+			for i, c := range info.LTE.IntraFrequencyNeighbors {
+				fmt.Printf("    [%d] PCI=%d RSRQ=%.1f RSRP=%.1f RSSI=%.1f RX=%d\n",
+					i, c.PhysicalCellID,
+					float64(c.RSRQ)/10.0,
+					float64(c.RSRP)/10.0,
+					float64(c.RSSI)/10.0,
+					c.CellSelectionRXLevel)
+			}
+		}
+		if len(info.LTE.InterFrequencyNeighbors) > 0 {
+			fmt.Printf("  Inter-frequency entries (%d):\n", len(info.LTE.InterFrequencyNeighbors))
+			for i, freq := range info.LTE.InterFrequencyNeighbors {
+				fmt.Printf("    [%d] EARFCN=%d Low/High=%d/%d", i, freq.EARFCN,
+					freq.CellSelectionRXLevelLow, freq.CellSelectionRXLevelHigh)
+				if freq.HasCellReselectionPriority {
+					fmt.Printf(" Priority=%d", freq.CellReselectionPriority)
+				}
+				fmt.Printf(" Neighbors=%d\n", len(freq.Neighbors))
+				for j, c := range freq.Neighbors {
+					fmt.Printf("      [%d] PCI=%d RSRQ=%.1f RSRP=%.1f RSSI=%.1f RX=%d\n",
+						j, c.PhysicalCellID,
+						float64(c.RSRQ)/10.0,
+						float64(c.RSRP)/10.0,
+						float64(c.RSSI)/10.0,
+						c.CellSelectionRXLevel)
+				}
+			}
+		}
+	}
+	if info.NR5G != nil {
+		fmt.Println("NR5G serving:")
+		fmt.Printf("  PLMN: %s-%s\n", info.NR5G.MCC, info.NR5G.MNC)
+		fmt.Printf("  TAC: %d  GlobalCellID: %d (0x%x)\n", info.NR5G.TAC, info.NR5G.GlobalCellID, info.NR5G.GlobalCellID)
+		fmt.Printf("  PhysicalCellID: %d\n", info.NR5G.PhysicalCellID)
+		fmt.Printf("  RSRQ: %.1f  RSRP: %.1f  SNR: %.1f\n",
+			float64(info.NR5G.RSRQ)/10.0,
+			float64(info.NR5G.RSRP)/10.0,
+			float64(info.NR5G.SNR)/10.0)
+		if info.NR5G.HasARFCN {
+			fmt.Printf("  ARFCN: %d\n", info.NR5G.ARFCN)
+		}
+	}
+	fmt.Println()
+}
+
 func runDump(ctx context.Context, client *qmi.Client, nas *qmi.NASService) {
 	fmt.Println("=== NAS Dump TLVs ===")
 
@@ -158,6 +232,7 @@ func runDump(ctx context.Context, client *qmi.Client, nas *qmi.NASService) {
 		{name: "NASGetSysInfo", msgID: qmi.NASGetSysInfo, client: nas.ClientID()},
 		{name: "NASGetSignalInfo", msgID: 0x004F, client: nas.ClientID()},
 		{name: "NASPerformNetworkScan", msgID: qmi.NASPerformNetworkScan, client: nas.ClientID()},
+		{name: "NASGetCellLocationInfo", msgID: qmi.NASGetCellLocationInfo, client: nas.ClientID()},
 	}
 
 	for _, it := range items {

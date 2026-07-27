@@ -597,6 +597,14 @@ func (m *Manager) NASGetRFBandInfo(ctx context.Context) (*qmi.RFBandInfo, error)
 	})
 }
 
+// GetCellLocationInfo 获取当前服务小区与邻区测量信息（含 LTE intrafrequency
+// / interfrequency 邻居以及 5GNR serving cell）。
+func (m *Manager) GetCellLocationInfo(ctx context.Context) (*qmi.CellLocationInfo, error) {
+	return withNASRecoveryValue(m, "GetCellLocationInfo", func(nas *qmi.NASService) (*qmi.CellLocationInfo, error) {
+		return nas.GetCellLocationInfo(ctx)
+	})
+}
+
 // NASGetTechnologyPreference 获取当前 RAT 偏好
 func (m *Manager) NASGetTechnologyPreference(ctx context.Context) (*qmi.TechnologyPreference, error) {
 	return withNASRecoveryValue(m, "NASGetTechnologyPreference", func(nas *qmi.NASService) (*qmi.TechnologyPreference, error) {

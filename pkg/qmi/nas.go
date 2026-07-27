@@ -139,23 +139,61 @@ type NetworkScanResult struct {
 }
 
 // SignalInfo contains detailed signal strength information / SignalInfo 包含详细的信号强度信息
+//
+// 所有信号字段单位为可直接展示的整数：
+//   RSRP：dBm（如 -91）
+//   RSRQ：dB （如 -11）
+//   SINR/SNR：dB（如 10）
+//
+// 数据来源：
+//   - LTE 来自 TLV 0x14（libqmi / Quectel 私有）
+//   - 5G NSA 来自 TLV 0x17（Quectel 私有：rsrp + snr×10）
+//   - 5G SA 来自 TLV 0x18（Quectel 私有：仅 nr5g_rsrq；SA RSRP/SNR 不在此消息中）
 type SignalInfo struct {
 	// LTE specific
-	LTERSRP  int16 // Reference Signal Received Power
-	LTERSRQ  int16 // Reference Signal Received Quality
-	LTERSSNR int16 // Signal-to-Noise Ratio
+	LTERSRP  int16 // dBm
+	LTERSRQ  int16 // dB
+	LTERSSNR int16 // dB
 
 	// 5G specific
-	NR5GRSRP int16
-	NR5GRSRQ int16
-	NR5GSINR int16
+	NR5GRSRP int16 // dBm（NSA 时取自主 TLV；SA 模式 Quectel 不在此消息中提供 RSRP，保持 0）
+	NR5GRSRQ int16 // dB（SA 来自 TLV 0x18；NSA 此消息不含 RSRQ，保持 0）
+	NR5GSINR int16 // dB（NSA 来自 TLV 0x17；SA 不提供，保持 0）
 }
 
 // SysInfo contains system information / SysInfo 包含系统信息
+//
+// 涵盖 Quectel RM5xxQ 5G SA/NSA 所需字段：
+//   - LTE / 3G 基础信息（CellID/TAC/LAC）来自 TLV 0x19
+//   - NR5G 服务状态（SA / NSA / EN-DC）来自 TLV 0x4A
+//   - NR5G System Info（PLMN/CellID/TAC/Band/ARFCN/srv_domain 等）来自 TLV 0x4B
+//   - EN-DC availability 来自 TLV 0x4E
+//   - DCNR restriction 来自 TLV 0x4F
 type SysInfo struct {
+	// 来自 TLV 0x19（通用）
 	CellID uint64
 	TAC    uint16 // Tracking Area Code
 	LAC    uint16 // Location Area Code
+
+	// 来自 TLV 0x4A：NR5G 服务状态
+	NR5GServiceStatusValid bool
+	NR5GServiceStatus      uint8 // 0=NoService 1=Limited 2=Available 3=LimitedRegional ...
+
+	// 来自 TLV 0x4B：NR5G System Info
+	NR5GValid          bool
+	NR5GServiceDomain  uint8 // bit 0 = PS, bit 1 = CS（per 3GPP 24.008）
+	NR5GMCC            string
+	NR5GMNC            string
+	NR5GCellID         uint32
+	NR5GTAC            uint16
+
+	// 来自 TLV 0x4E：EN-DC available
+	ENDCAvailableValid bool
+	ENDCAvailable      bool
+
+	// 来自 TLV 0x4F：DCNR restriction
+	DCNRRestrictionValid bool
+	DCNRRestriction      bool
 }
 
 // RFBandInfoEntry describes one active RF band/channel tuple.
@@ -260,7 +298,32 @@ type UMTSCellLocationInfo struct {
 	ECIO                  int16
 }
 
-// LTECellLocationInfo contains serving LTE cell fields.
+// LTECellNeighbor describes a single neighboring LTE cell reported by the modem.
+// Measurement units follow the QMI NAS specification: RSRQ / RSRP / RSSI are
+// reported as int16 values in 0.1 dB / dBm steps (caller divides by 10 to
+// obtain the human-readable measurement).
+type LTECellNeighbor struct {
+	PhysicalCellID       uint16
+	RSRQ                 int16 // 0.1 dB
+	RSRP                 int16 // 0.1 dBm
+	RSSI                 int16 // 0.1 dBm
+	CellSelectionRXLevel int16
+}
+
+// LTECellInterFrequency describes a single LTE inter-frequency entry together
+// with the neighboring cells measured on that frequency.
+type LTECellInterFrequency struct {
+	EARFCN                       uint16
+	CellSelectionRXLevelLow      uint8
+	CellSelectionRXLevelHigh     uint8
+	CellReselectionPriority      uint8
+	HasCellReselectionPriority   bool // only meaningful when the TLV reports ue_in_idle=1
+	Neighbors                    []LTECellNeighbor
+}
+
+// LTECellLocationInfo contains serving LTE cell fields along with the
+// intra-frequency and inter-frequency neighbor-cell measurements reported by
+// the modem.
 type LTECellLocationInfo struct {
 	UEInIdle                 bool
 	MCC                      string
@@ -276,6 +339,8 @@ type LTECellLocationInfo struct {
 	HasIdleThresholds        bool
 	TimingAdvance            uint32
 	HasTimingAdvance         bool
+	IntraFrequencyNeighbors  []LTECellNeighbor
+	InterFrequencyNeighbors  []LTECellInterFrequency
 }
 
 // NR5GCellLocationInfo contains serving NR5G cell fields.
@@ -789,6 +854,103 @@ func ParseSysInfoIndication(packet *Packet) (*SysInfo, error) {
 		}
 	}
 
+	// TLV 0x4A：NR5G 服务状态（Quectel QCQMUX.h SERVICE_STATUS_INFO packed）
+	//   bytes: srv_status(1) + true_srv_status(1) + is_pref_data_path(1)
+	if tlv := FindTLV(packet.TLVs, 0x4A); tlv != nil && len(tlv.Value) >= 1 {
+		info.NR5GServiceStatusValid = true
+		info.NR5GServiceStatus = tlv.Value[0]
+	}
+
+	// TLV 0x4B：NR5G System Info（Quectel QCQMUX.h:3360-3386 NR5G_SYSTEM_INFO packed）
+	//   layout: srv_domain_valid(1) + srv_domain(1)
+	//           srv_capability_valid(1) + srv_capability(1)
+	//           roam_status_valid(1) + roam_status(1)
+	//           is_sys_forbidden_valid(1) + is_sys_forbidden(1)
+	//           lac_valid(1) + lac(2)
+	//           cell_id_valid(1) + cell_id(4)
+	//           reg_reject_info_valid(1) + reject_srv_domain(1) + rej_cause(1)
+	//           network_id_valid(1) + MCC(3) + MNC(3)
+	//           tac_valid(1) + tac(2)
+	if tlv := FindTLV(packet.TLVs, 0x4B); tlv != nil {
+		info.NR5GValid = true
+		off := 0
+		// 0: srv_domain_valid
+		if off < len(tlv.Value) && tlv.Value[off] == 1 {
+			off++
+			// 1: srv_domain
+			if off < len(tlv.Value) {
+				info.NR5GServiceDomain = tlv.Value[off]
+				off++
+			} else { off++ }
+		} else if off < len(tlv.Value) { off += 2 }
+		// 2-3: srv_capability (skip)
+		if off+2 <= len(tlv.Value) { off += 2 }
+		// 4-5: roam_status (skip)
+		if off+2 <= len(tlv.Value) { off += 2 }
+		// 6-7: is_sys_forbidden (skip)
+		if off+2 <= len(tlv.Value) { off += 2 }
+		// 8: lac_valid
+		if off < len(tlv.Value) && tlv.Value[off] == 1 {
+			off++
+			// 9-10: lac
+			if off+2 <= len(tlv.Value) {
+				off += 2
+			} else { off++ }
+		} else if off < len(tlv.Value) { off += 3 }
+		// 11: cell_id_valid
+		if off < len(tlv.Value) && tlv.Value[off] == 1 {
+			off++
+			// 12-15: cell_id
+			if off+4 <= len(tlv.Value) {
+				info.NR5GCellID = binary.LittleEndian.Uint32(tlv.Value[off : off+4])
+				off += 4
+			} else { off++ }
+		} else if off < len(tlv.Value) { off += 5 }
+		// 16: reg_reject_info_valid
+		if off < len(tlv.Value) && tlv.Value[off] == 1 {
+			off += 3 // srv_domain(1) + cause(1) + skip 1? actually reject_srv_domain(1) + rej_cause(1)
+		} else if off < len(tlv.Value) { off++ }
+		// network_id_valid + MCC(3) + MNC packed (2 字节 BCD；最后 nibble 0xF 表示 2-digit MNC)
+		// Quectel 实际: MCC = bytes [off..off+3)，MNC = bytes [off+3..off+5)，不像 QModem QCQMUX.h 写的 MCC[3]+MNC[3]=6 字节
+		if off < len(tlv.Value) && tlv.Value[off] == 1 {
+			off++
+			if off+5 <= len(tlv.Value) {
+				mcc, _ := decodeBCDPLMN(tlv.Value[off : off+3])
+				info.NR5GMCC = mcc
+				// MNC: 2 字节 BCD packed（参见 3GPP TS 24.008 PLMN 编码；末尾 0xF = 2-digit）
+				mnc1 := tlv.Value[off+3] & 0x0F
+				mnc2 := (tlv.Value[off+3] >> 4) & 0x0F
+				mnc3 := tlv.Value[off+4] & 0x0F
+				if mnc3 == 0x0F {
+					info.NR5GMNC = fmt.Sprintf("%d%d", mnc1, mnc2)
+				} else {
+					info.NR5GMNC = fmt.Sprintf("%d%d%d", mnc1, mnc2, mnc3)
+				}
+				off += 5
+			} else { off += 5 }
+		} else if off < len(tlv.Value) { off += 6 }
+		// tac_valid + tac
+		if off < len(tlv.Value) && tlv.Value[off] == 1 {
+			off++
+			if off+2 <= len(tlv.Value) {
+				info.NR5GTAC = binary.LittleEndian.Uint16(tlv.Value[off : off+2])
+				off += 2
+			}
+		}
+	}
+
+	// TLV 0x4E：EN-DC availability
+	if tlv := FindTLV(packet.TLVs, 0x4E); tlv != nil && len(tlv.Value) >= 1 {
+		info.ENDCAvailableValid = true
+		info.ENDCAvailable = tlv.Value[0] != 0
+	}
+
+	// TLV 0x4F：DCNR restriction
+	if tlv := FindTLV(packet.TLVs, 0x4F); tlv != nil && len(tlv.Value) >= 1 {
+		info.DCNRRestrictionValid = true
+		info.DCNRRestriction = tlv.Value[0] != 0
+	}
+
 	return info, nil
 }
 
@@ -803,6 +965,16 @@ func (n *NASService) GetOperatorName(ctx context.Context) (*NASOperatorNameInfo,
 
 func ParseOperatorNameIndication(packet *Packet) (*NASOperatorNameInfo, error) {
 	return parseOperatorNamePacket(packet, false)
+}
+
+// ParseCellLocationInfoIndication parses a QMI_NAS_GET_CELL_LOCATION_INFO
+// indication packet pushed by the modem. Unlike the response variant the
+// indication carries no result TLV so CheckResult is intentionally skipped.
+func ParseCellLocationInfoIndication(packet *Packet) (*CellLocationInfo, error) {
+	if packet == nil {
+		return nil, fmt.Errorf("cell location info indication packet is nil")
+	}
+	return parseCellLocationInfoPacket(packet, false)
 }
 
 // GetPLMNName resolves PLMN long/short names for the given PLMN.
@@ -1072,16 +1244,27 @@ func buildSystemSelectionPreferenceTLVs(pref SystemSelectionPreference) ([]TLV, 
 func parseSignalInfoPacket(packet *Packet) (*SignalInfo, error) {
 	info := &SignalInfo{}
 
+	// LTE Signal Strength TLV 0x14（libqmi / Quectel 布局：int8 RSSI + int8 RSRQ + int16 RSRP + int16 SNR，共 6 字节）
 	if tlv := FindTLV(packet.TLVs, 0x14); tlv != nil && len(tlv.Value) >= 6 {
 		info.LTERSRQ = int16(int8(tlv.Value[1]))
 		info.LTERSRP = int16(binary.LittleEndian.Uint16(tlv.Value[2:4]))
 		info.LTERSSNR = int16(binary.LittleEndian.Uint16(tlv.Value[4:6]))
 	}
 
-	if tlv := FindTLV(packet.TLVs, 0x17); tlv != nil && len(tlv.Value) >= 6 {
-		info.NR5GRSRP = int16(binary.LittleEndian.Uint16(tlv.Value[2:4]))
+	// 5G NSA Signal Strength TLV 0x17（Quectel 私有布局：int16 RSRP + int16 SNR×10，共 4 字节）。
+	// NSA 下 TLV 0x18 不出现，仅有 0x17 提供 RSRP/SNR。
+	if tlv := FindTLV(packet.TLVs, 0x17); tlv != nil && len(tlv.Value) >= 4 {
+		info.NR5GRSRP = int16(binary.LittleEndian.Uint16(tlv.Value[0:2]))
+		// SNR 编码 = 实际 dB × 10（如 100 → 10.0 dB）
+		snr := int16(binary.LittleEndian.Uint16(tlv.Value[2:4]))
+		info.NR5GSINR = int16((int32(snr) + 5) / 10)
+	}
+
+	// 5G SA Signal Strength TLV 0x18（Quectel 私有布局：int16 nr5g_rsrq，2 字节）。
+	// 注意：SA 模式下 Quectel 仅通过此 TLV 给出 RSRQ；SA RSRP 不在此消息中，
+	// 需要由上层经 AT 通道 / 其他 QMI 请求补齐（vohive 暂不 fallback AT，SA RSRP 字段保持 0）。
+	if tlv := FindTLV(packet.TLVs, 0x18); tlv != nil && len(tlv.Value) >= 2 {
 		info.NR5GRSRQ = int16(binary.LittleEndian.Uint16(tlv.Value[0:2]))
-		info.NR5GSINR = int16(binary.LittleEndian.Uint16(tlv.Value[4:6]))
 	}
 
 	return info, nil
@@ -1345,13 +1528,26 @@ func parseSystemSelectionPreferenceResponse(resp *Packet) (*SystemSelectionPrefe
 }
 
 func parseCellLocationInfoResponse(resp *Packet) (*CellLocationInfo, error) {
-	if err := resp.CheckResult(); err != nil {
-		return nil, fmt.Errorf("get cell location info failed: %w", err)
+	return parseCellLocationInfoPacket(resp, true)
+}
+
+// parseCellLocationInfoPacket is the shared parser for both the response and
+// the indication. When checkResult is true the result TLV (0x02) is
+// validated; indications do not carry a result TLV so callers should pass
+// false.
+func parseCellLocationInfoPacket(packet *Packet, checkResult bool) (*CellLocationInfo, error) {
+	if packet == nil {
+		return nil, fmt.Errorf("cell location info packet is nil")
+	}
+	if checkResult {
+		if err := packet.CheckResult(); err != nil {
+			return nil, fmt.Errorf("get cell location info failed: %w", err)
+		}
 	}
 
 	info := &CellLocationInfo{}
 
-	if tlv := FindTLV(resp.TLVs, 0x10); tlv != nil && len(tlv.Value) >= 18 {
+	if tlv := FindTLV(packet.TLVs, 0x10); tlv != nil && len(tlv.Value) >= 18 {
 		mcc, mnc := decodeBCDPLMN(tlv.Value[4:7])
 		geran := &GERANCellLocationInfo{
 			CellID:        binary.LittleEndian.Uint32(tlv.Value[0:4]),
@@ -1370,7 +1566,7 @@ func parseCellLocationInfoResponse(resp *Packet) (*CellLocationInfo, error) {
 		info.GERAN = geran
 	}
 
-	if tlv := FindTLV(resp.TLVs, 0x11); tlv != nil && len(tlv.Value) >= 15 {
+	if tlv := FindTLV(packet.TLVs, 0x11); tlv != nil && len(tlv.Value) >= 15 {
 		mcc, mnc := decodeBCDPLMN(tlv.Value[2:5])
 		info.UMTS = &UMTSCellLocationInfo{
 			CellID:                uint32(binary.LittleEndian.Uint16(tlv.Value[0:2])),
@@ -1384,7 +1580,7 @@ func parseCellLocationInfoResponse(resp *Packet) (*CellLocationInfo, error) {
 		}
 	}
 
-	if tlv := FindTLV(resp.TLVs, 0x13); tlv != nil && len(tlv.Value) >= 18 {
+	if tlv := FindTLV(packet.TLVs, 0x13); tlv != nil && len(tlv.Value) >= 18 {
 		mcc, mnc := decodeBCDPLMN(tlv.Value[1:4])
 		lte := &LTECellLocationInfo{
 			UEInIdle:                 tlv.Value[0] != 0,
@@ -1402,17 +1598,92 @@ func parseCellLocationInfoResponse(resp *Packet) (*CellLocationInfo, error) {
 		if lte.UEInIdle {
 			lte.HasIdleThresholds = true
 		}
+		// Intra-frequency neighbor cells: cells_len at offset 18, each entry
+		// (NasGetCellLocationLteInfoCell) is 10 bytes packed.
+		if len(tlv.Value) >= 19 {
+			cellsLen := int(tlv.Value[18])
+			const cellSize = 10 // physical_cell_id(2)+rsrq(2)+rsrp(2)+rssi(2)+cell_selection_rx_level(2)
+			needed := 19 + cellsLen*cellSize
+			if len(tlv.Value) >= needed && cellsLen > 0 {
+				neighbors := make([]LTECellNeighbor, 0, cellsLen)
+				for i := 0; i < cellsLen; i++ {
+					base := 19 + i*cellSize
+					neighbors = append(neighbors, LTECellNeighbor{
+						PhysicalCellID:       binary.LittleEndian.Uint16(tlv.Value[base : base+2]),
+						RSRQ:                 int16(binary.LittleEndian.Uint16(tlv.Value[base+2 : base+4])),
+						RSRP:                 int16(binary.LittleEndian.Uint16(tlv.Value[base+4 : base+6])),
+						RSSI:                 int16(binary.LittleEndian.Uint16(tlv.Value[base+6 : base+8])),
+						CellSelectionRXLevel: int16(binary.LittleEndian.Uint16(tlv.Value[base+8 : base+10])),
+					})
+				}
+				lte.IntraFrequencyNeighbors = neighbors
+			}
+		}
 		info.LTE = lte
 	}
 
-	if tlv := FindTLV(resp.TLVs, 0x17); tlv != nil && len(tlv.Value) >= 4 {
+	if tlv := FindTLV(packet.TLVs, 0x14); tlv != nil && len(tlv.Value) >= 2 {
+		ueInIdle := tlv.Value[0] != 0
+		freqsLen := int(tlv.Value[1])
+		if info.LTE == nil {
+			info.LTE = &LTECellLocationInfo{UEInIdle: ueInIdle}
+		} else if !info.LTE.UEInIdle {
+			info.LTE.UEInIdle = ueInIdle
+		}
+		const freqHeaderSize = 6 // EARFCN(2)+Low(1)+High(1)+Priority(1)+cells_len(1)
+		const neighborSize  = 10
+		offset := 2
+		interFreqs := make([]LTECellInterFrequency, 0, freqsLen)
+		for i := 0; i < freqsLen; i++ {
+			if offset+freqHeaderSize > len(tlv.Value) {
+				break
+			}
+			freq := LTECellInterFrequency{
+				EARFCN:                   binary.LittleEndian.Uint16(tlv.Value[offset : offset+2]),
+				CellSelectionRXLevelLow:  tlv.Value[offset+2],
+				CellSelectionRXLevelHigh: tlv.Value[offset+3],
+			}
+			if ueInIdle {
+				freq.CellReselectionPriority = tlv.Value[offset+4]
+				freq.HasCellReselectionPriority = true
+			}
+			cellsLen := int(tlv.Value[offset+5])
+			offset += freqHeaderSize
+			if offset+cellsLen*neighborSize > len(tlv.Value) {
+				// Truncated TLV: stop processing this frequency to avoid
+				// reading past the end of the value buffer.
+				break
+			}
+			if cellsLen > 0 {
+				neighbors := make([]LTECellNeighbor, 0, cellsLen)
+				for j := 0; j < cellsLen; j++ {
+					base := offset + j*neighborSize
+					neighbors = append(neighbors, LTECellNeighbor{
+						PhysicalCellID:       binary.LittleEndian.Uint16(tlv.Value[base : base+2]),
+						RSRQ:                 int16(binary.LittleEndian.Uint16(tlv.Value[base+2 : base+4])),
+						RSRP:                 int16(binary.LittleEndian.Uint16(tlv.Value[base+4 : base+6])),
+						RSSI:                 int16(binary.LittleEndian.Uint16(tlv.Value[base+6 : base+8])),
+						CellSelectionRXLevel: int16(binary.LittleEndian.Uint16(tlv.Value[base+8 : base+10])),
+					})
+				}
+				offset += cellsLen * neighborSize
+				freq.Neighbors = neighbors
+			}
+			interFreqs = append(interFreqs, freq)
+		}
+		if len(interFreqs) > 0 && info.LTE != nil {
+			info.LTE.InterFrequencyNeighbors = interFreqs
+		}
+	}
+
+	if tlv := FindTLV(packet.TLVs, 0x17); tlv != nil && len(tlv.Value) >= 4 {
 		if info.UMTS == nil {
 			info.UMTS = &UMTSCellLocationInfo{}
 		}
 		info.UMTS.CellID = binary.LittleEndian.Uint32(tlv.Value[0:4])
 	}
 
-	if tlv := FindTLV(resp.TLVs, 0x1E); tlv != nil && len(tlv.Value) >= 4 {
+	if tlv := FindTLV(packet.TLVs, 0x1E); tlv != nil && len(tlv.Value) >= 4 {
 		if info.LTE == nil {
 			info.LTE = &LTECellLocationInfo{}
 		}
@@ -1423,7 +1694,7 @@ func parseCellLocationInfoResponse(resp *Packet) (*CellLocationInfo, error) {
 		}
 	}
 
-	if tlv := FindTLV(resp.TLVs, 0x2E); tlv != nil && len(tlv.Value) >= 4 {
+	if tlv := FindTLV(packet.TLVs, 0x2E); tlv != nil && len(tlv.Value) >= 4 {
 		if info.NR5G == nil {
 			info.NR5G = &NR5GCellLocationInfo{}
 		}
@@ -1431,7 +1702,7 @@ func parseCellLocationInfoResponse(resp *Packet) (*CellLocationInfo, error) {
 		info.NR5G.HasARFCN = true
 	}
 
-	if tlv := FindTLV(resp.TLVs, 0x2F); tlv != nil && len(tlv.Value) >= 20 {
+	if tlv := FindTLV(packet.TLVs, 0x2F); tlv != nil && len(tlv.Value) >= 20 {
 		mcc, mnc := decodeBCDPLMN(tlv.Value[0:3])
 		if info.NR5G == nil {
 			info.NR5G = &NR5GCellLocationInfo{}
@@ -1441,15 +1712,19 @@ func parseCellLocationInfoResponse(resp *Packet) (*CellLocationInfo, error) {
 		info.NR5G.TAC = decodeUint24(tlv.Value[3:6])
 		info.NR5G.GlobalCellID = binary.LittleEndian.Uint64(tlv.Value[6:14])
 		info.NR5G.PhysicalCellID = binary.LittleEndian.Uint16(tlv.Value[14:16])
-		info.NR5G.RSRQ = int16(binary.LittleEndian.Uint16(tlv.Value[16:18]))
-		info.NR5G.RSRP = int16(binary.LittleEndian.Uint16(tlv.Value[18:20]))
+		// Quectel NR5G TLV 0x2F 字段是 ×0.1 缩放：100 → 10.0 dBm/dB（参考 QModem QCQMUX.h:3851-3853）
+		rawRSRQ := int16(binary.LittleEndian.Uint16(tlv.Value[16:18]))
+		rawRSRP := int16(binary.LittleEndian.Uint16(tlv.Value[18:20]))
+		info.NR5G.RSRQ = int16(int32(rawRSRQ) / 10)
+		info.NR5G.RSRP = int16(int32(rawRSRP) / 10)
 		if len(tlv.Value) >= 22 {
-			info.NR5G.SNR = int16(binary.LittleEndian.Uint16(tlv.Value[20:22]))
+			rawSNR := int16(binary.LittleEndian.Uint16(tlv.Value[20:22]))
+			info.NR5G.SNR = int16(int32(rawSNR) / 10)
 		}
 	}
 
 	if info.GERAN == nil && info.UMTS == nil && info.LTE == nil && info.NR5G == nil {
-		return nil, fmt.Errorf("no cell location TLVs in response")
+		return nil, fmt.Errorf("no cell location TLVs in packet")
 	}
 
 	return info, nil
@@ -1661,23 +1936,39 @@ func decodeUint24(b []byte) uint32 {
 	return uint32(b[0])<<16 | uint32(b[1])<<8 | uint32(b[2])
 }
 
+// decodeBCDPLMN decodes a 3-byte BCD-encoded PLMN as defined by 3GPP TS 24.008.
+//
+// Each byte carries two BCD nibbles (low half first). The MCC is always
+// three digits. The MNC is either two or three digits: when nibble[3] (the
+// high nibble of PLMN[1]) equals 0xF the MNC is a 2-digit value and the
+// filler is omitted, mirroring quectel-CM's str_from_bcd_plmn behaviour.
 func decodeBCDPLMN(plmn []byte) (string, string) {
 	if len(plmn) < 3 {
 		return "", ""
 	}
 
-	mcc1 := plmn[0] & 0x0F
-	mcc2 := (plmn[0] >> 4) & 0x0F
-	mcc3 := plmn[1] & 0x0F
-	mnc3 := (plmn[1] >> 4) & 0x0F
-	mnc1 := plmn[2] & 0x0F
-	mnc2 := (plmn[2] >> 4) & 0x0F
-
-	mcc := fmt.Sprintf("%d%d%d", mcc1, mcc2, mcc3)
-	if mnc3 == 0x0F {
-		return mcc, fmt.Sprintf("%d%d", mnc1, mnc2)
+	mcc := []byte{
+		'0' + (plmn[0] & 0x0F),
+		'0' + ((plmn[0] >> 4) & 0x0F),
+		'0' + (plmn[1] & 0x0F),
 	}
-	return mcc, fmt.Sprintf("%d%d%d", mnc1, mnc2, mnc3)
+
+	mncNibble3 := (plmn[1] >> 4) & 0x0F
+	var mnc []byte
+	if mncNibble3 == 0x0F {
+		// 2-digit MNC.
+		mnc = []byte{
+			'0' + (plmn[2] & 0x0F),
+			'0' + ((plmn[2] >> 4) & 0x0F),
+		}
+	} else {
+		mnc = []byte{
+			'0' + mncNibble3,
+			'0' + (plmn[2] & 0x0F),
+			'0' + ((plmn[2] >> 4) & 0x0F),
+		}
+	}
+	return string(mcc), string(mnc)
 }
 
 // ============================================================================

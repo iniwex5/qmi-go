@@ -72,6 +72,11 @@ type DeviceSnapshot struct {
 	lastNASIncrementalScan  time.Time
 	nasIncrementalScanValid bool
 
+	// 来自 NAS CellLocationInfo indication（最近一次）
+	nasCellLocationInfo      *qmi.CellLocationInfo
+	lastNASCellLocationInfo  time.Time
+	nasCellLocationInfoValid bool
+
 	// 来自 UIM refresh indication
 	uimRefresh      *qmi.UIMRefreshIndication
 	lastUIMRefresh  time.Time
@@ -334,6 +339,51 @@ func (s *DeviceSnapshot) updateNASNetworkReject(info *qmi.NASNetworkRejectInfo) 
 	s.mu.Unlock()
 }
 
+// updateNASCellLocationInfo records the latest NAS CellLocationInfo snapshot.
+// The deep copy mirrors the structure ownership rules used by the other NAS
+// helpers so that subscribers cannot mutate the snapshot in place.
+func (s *DeviceSnapshot) updateNASCellLocationInfo(info *qmi.CellLocationInfo) {
+	if info == nil {
+		return
+	}
+	copied := *info
+	if info.GERAN != nil {
+		g := *info.GERAN
+		copied.GERAN = &g
+	}
+	if info.UMTS != nil {
+		u := *info.UMTS
+		copied.UMTS = &u
+	}
+	if info.LTE != nil {
+		l := *info.LTE
+		if len(info.LTE.IntraFrequencyNeighbors) > 0 {
+			l.IntraFrequencyNeighbors = append([]qmi.LTECellNeighbor(nil), info.LTE.IntraFrequencyNeighbors...)
+		}
+		if len(info.LTE.InterFrequencyNeighbors) > 0 {
+			inter := make([]qmi.LTECellInterFrequency, len(info.LTE.InterFrequencyNeighbors))
+			for i, freq := range info.LTE.InterFrequencyNeighbors {
+				cf := freq
+				if len(freq.Neighbors) > 0 {
+					cf.Neighbors = append([]qmi.LTECellNeighbor(nil), freq.Neighbors...)
+				}
+				inter[i] = cf
+			}
+			l.InterFrequencyNeighbors = inter
+		}
+		copied.LTE = &l
+	}
+	if info.NR5G != nil {
+		n := *info.NR5G
+		copied.NR5G = &n
+	}
+	s.mu.Lock()
+	s.nasCellLocationInfo = &copied
+	s.lastNASCellLocationInfo = time.Now()
+	s.nasCellLocationInfoValid = true
+	s.mu.Unlock()
+}
+
 func cloneScanResults(in []qmi.NetworkScanResult) []qmi.NetworkScanResult {
 	if len(in) == 0 {
 		return nil
@@ -496,6 +546,53 @@ func (s *DeviceSnapshot) NASIncrementalScan() (*qmi.NASIncrementalNetworkScanInf
 	return cloneNASIncrementalScan(s.nasIncrementalScan), s.lastNASIncrementalScan, s.nasIncrementalScanValid
 }
 
+// NASCellLocationInfo 返回最近一次 NAS CellLocationInfo indication 及时间戳与有效标记。
+func (s *DeviceSnapshot) NASCellLocationInfo() (*qmi.CellLocationInfo, time.Time, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneNASCellLocationInfoForSnapshot(s.nasCellLocationInfo), s.lastNASCellLocationInfo, s.nasCellLocationInfoValid
+}
+
+// cloneNASCellLocationInfoForSnapshot 拷贝一份 NAS CellLocationInfo 防止外部
+// 修改内部状态，遵循其他 NAS helper 的所有权约定。
+func cloneNASCellLocationInfoForSnapshot(in *qmi.CellLocationInfo) *qmi.CellLocationInfo {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if in.GERAN != nil {
+		g := *in.GERAN
+		out.GERAN = &g
+	}
+	if in.UMTS != nil {
+		u := *in.UMTS
+		out.UMTS = &u
+	}
+	if in.LTE != nil {
+		l := *in.LTE
+		if len(in.LTE.IntraFrequencyNeighbors) > 0 {
+			l.IntraFrequencyNeighbors = append([]qmi.LTECellNeighbor(nil), in.LTE.IntraFrequencyNeighbors...)
+		}
+		if len(in.LTE.InterFrequencyNeighbors) > 0 {
+			inter := make([]qmi.LTECellInterFrequency, len(in.LTE.InterFrequencyNeighbors))
+			for i, freq := range in.LTE.InterFrequencyNeighbors {
+				cf := freq
+				if len(freq.Neighbors) > 0 {
+					cf.Neighbors = append([]qmi.LTECellNeighbor(nil), freq.Neighbors...)
+				}
+				inter[i] = cf
+			}
+			l.InterFrequencyNeighbors = inter
+		}
+		out.LTE = &l
+	}
+	if in.NR5G != nil {
+		n := *in.NR5G
+		out.NR5G = &n
+	}
+	return &out
+}
+
 // UIMRefresh 返回最近一次 UIM refresh indication 及时间戳和有效标记。
 func (s *DeviceSnapshot) UIMRefresh() (*qmi.UIMRefreshIndication, time.Time, bool) {
 	s.mu.RLock()
@@ -625,6 +722,9 @@ func (s *DeviceSnapshot) Reset() {
 	s.nasIncrementalScan = nil
 	s.lastNASIncrementalScan = time.Time{}
 	s.nasIncrementalScanValid = false
+	s.nasCellLocationInfo = nil
+	s.lastNASCellLocationInfo = time.Time{}
+	s.nasCellLocationInfoValid = false
 	s.uimRefresh = nil
 	s.lastUIMRefresh = time.Time{}
 	s.uimRefreshValid = false
