@@ -148,6 +148,14 @@ type CardStatusDetails struct {
 	UPUKRetries         uint8
 }
 
+// UIMApplication is one application reported by UIM_GET_CARD_STATUS.
+// AID is the complete application identifier, not only the well-known prefix.
+type UIMApplication struct {
+	Type  uint8
+	State uint8
+	AID   []byte
+}
+
 type uimCardStatusApp struct {
 	appType             uint8
 	appState            uint8
@@ -316,21 +324,10 @@ func (u *UIMService) Close() error {
 }
 
 func (u *UIMService) GetCardStatusDetails(ctx context.Context) (*CardStatusDetails, SIMStatus, error) {
-	resp, err := u.client.SendRequest(ctx, ServiceUIM, u.clientID, UIMGetCardStatus, nil)
+	v, err := u.getCardStatusValue(ctx)
 	if err != nil {
 		return nil, SIMAbsent, err
 	}
-
-	if err := resp.CheckResult(); err != nil {
-		return nil, SIMAbsent, fmt.Errorf("UIM get card status failed: %w", err)
-	}
-
-	tlv := FindTLV(resp.TLVs, 0x10)
-	if tlv == nil || len(tlv.Value) < 15 {
-		return nil, SIMNotReady, fmt.Errorf("card status TLV missing or too short")
-	}
-
-	v := tlv.Value
 	details := &CardStatusDetails{}
 	details.NumSlot = v[8]
 	details.CardState = v[9]
@@ -408,6 +405,21 @@ func (u *UIMService) GetCardStatusDetails(ctx context.Context) (*CardStatusDetai
 	return details, status, nil
 }
 
+func (u *UIMService) getCardStatusValue(ctx context.Context) ([]byte, error) {
+	resp, err := u.client.SendRequest(ctx, ServiceUIM, u.clientID, UIMGetCardStatus, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := resp.CheckResult(); err != nil {
+		return nil, fmt.Errorf("UIM get card status failed: %w", err)
+	}
+	tlv := FindTLV(resp.TLVs, 0x10)
+	if tlv == nil || len(tlv.Value) < 15 {
+		return nil, fmt.Errorf("card status TLV missing or too short")
+	}
+	return append([]byte(nil), tlv.Value...), nil
+}
+
 func parseUIMCardStatusApps(v []byte, numApp uint8) []uimCardStatusApp {
 	offset := 15
 	apps := make([]uimCardStatusApp, 0, int(numApp))
@@ -457,6 +469,25 @@ func (u *UIMService) GetCardStatus(ctx context.Context) (SIMStatus, error) {
 	return st, err
 }
 
+// ListApplications returns every application from the active UIM card status.
+// The returned AIDs are complete and each item preserves its application state.
+func (u *UIMService) ListApplications(ctx context.Context) ([]UIMApplication, error) {
+	v, err := u.getCardStatusValue(ctx)
+	if err != nil {
+		return nil, err
+	}
+	raw := parseUIMCardStatusApps(v, v[14])
+	apps := make([]UIMApplication, 0, len(raw))
+	for _, app := range raw {
+		apps = append(apps, UIMApplication{
+			Type:  app.appType,
+			State: app.appState,
+			AID:   append([]byte(nil), app.aid...),
+		})
+	}
+	return apps, nil
+}
+
 func (u *UIMService) GetUSIMAID(ctx context.Context) ([]byte, error) {
 	return u.getCardStatusAID(ctx, UIMAppTypeUSIM, uimUSIMAIDPrefix, "USIM")
 }
@@ -466,18 +497,11 @@ func (u *UIMService) GetISIMAID(ctx context.Context) ([]byte, error) {
 }
 
 func (u *UIMService) getCardStatusAID(ctx context.Context, appType uint8, prefix []byte, label string) ([]byte, error) {
-	resp, err := u.client.SendRequest(ctx, ServiceUIM, u.clientID, UIMGetCardStatus, nil)
+	v, err := u.getCardStatusValue(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if err := resp.CheckResult(); err != nil {
-		return nil, fmt.Errorf("UIM get card status failed: %w", err)
-	}
-	tlv := FindTLV(resp.TLVs, 0x10)
-	if tlv == nil || len(tlv.Value) < 15 {
-		return nil, fmt.Errorf("card status TLV missing or too short")
-	}
-	apps := parseUIMCardStatusApps(tlv.Value, tlv.Value[14])
+	apps := parseUIMCardStatusApps(v, v[14])
 	for _, app := range apps {
 		if app.appType != appType {
 			continue
