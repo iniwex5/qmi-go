@@ -1309,12 +1309,7 @@ func (u *UIMService) ReadTransparentWithSession(ctx context.Context, sessionType
 		return tlv.Value[2 : 2+contentLen], nil
 	}
 
-	// Fallback to 0x10 just in case
-	if tlv := FindTLV(resp.TLVs, 0x10); tlv != nil {
-		return tlv.Value, nil
-	}
-
-	return nil, nil
+	return nil, fmt.Errorf("read result missing")
 }
 
 func (u *UIMService) GetICCID(ctx context.Context) (string, error) {
@@ -1406,7 +1401,7 @@ func (u *UIMService) GetGID1(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return simRawHex(data), nil
+	return simGIDHex(data), nil
 }
 
 func (u *UIMService) GetGID2(ctx context.Context) (string, error) {
@@ -1414,7 +1409,7 @@ func (u *UIMService) GetGID2(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return simRawHex(data), nil
+	return simGIDHex(data), nil
 }
 
 func (u *UIMService) GetSIMServiceTable(ctx context.Context) (*SIMServiceTable, error) {
@@ -1643,6 +1638,16 @@ func trimSPNPadding(data []byte) []byte {
 
 func simRawHex(data []byte) string {
 	data = trimSPNPadding(data)
+	if len(data) == 0 {
+		return ""
+	}
+	return strings.ToUpper(hex.EncodeToString(data))
+}
+
+// simGIDHex preserves the complete EF-GID value. Unlike text and TLV EFs,
+// 0xFF is a valid trailing byte in a carrier's GID selector (for example
+// 20:FF), so it must not be treated as generic SIM padding.
+func simGIDHex(data []byte) string {
 	if len(data) == 0 {
 		return ""
 	}

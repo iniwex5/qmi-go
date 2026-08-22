@@ -47,3 +47,9 @@ func TestBuildSendAPDUTLVsKeepsChannelIDForLogicalChannel(t *testing.T) {
 	}
 	t.Fatal("logical channel must include the Channel ID TLV")
 }
+
+func TestGIDRawHexPreservesTrailingFF(t *testing.T) {
+	if got := simGIDHex([]byte{0x20, 0xFF}); got != "20FF" {
+		t.Fatalf("simGIDHex()=%q want=20FF", got)
+	}
+}

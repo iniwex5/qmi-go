@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -504,6 +505,25 @@ func TestGetSIMServiceTableDoesNotRepeatSuccessfulEmptyRead(t *testing.T) {
 	}
 	if transparentReads != 1 {
 		t.Fatalf("expected one transparent read, got %d", transparentReads)
+	}
+}
+
+func TestReadTransparentRequiresReadResult(t *testing.T) {
+	c := newUIMUnitTestClient()
+	u := &UIMService{client: c, clientID: 1}
+	defer serveUIMUnitTestRequests(t, c, func(req *Packet) *Packet {
+		if req.MessageID != UIMReadTransparent {
+			t.Errorf("unexpected message 0x%04x", req.MessageID)
+		}
+		return &Packet{TLVs: []TLV{
+			successResultTLV(),
+			{Type: 0x10, Value: []byte{0x90, 0x00}},
+		}}
+	})()
+
+	_, err := u.ReadTransparentWithSession(context.Background(), UIMSessionTypePrimaryGWProvisioning, 0x6F3E, []byte{0x00, 0x3F, 0xFF, 0x7F})
+	if err == nil || !strings.Contains(err.Error(), "read result missing") {
+		t.Fatalf("ReadTransparentWithSession() error=%v, want missing read result", err)
 	}
 }
 
