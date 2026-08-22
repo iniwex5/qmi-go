@@ -1391,10 +1391,7 @@ func (u *UIMService) GetSIMMetadata(ctx context.Context) (*SIMMetadata, error) {
 	if opl, err := u.GetOPLRecords(ctx); err == nil {
 		meta.OPL = opl
 	}
-	if mcc, mnc, ok := nativeMCCMNCFromOPLRecords(meta.OPL); ok {
-		meta.NativeMCC = mcc
-		meta.NativeMNC = mnc
-	} else if mcc, mnc, err := u.getNativeMCCMNCFromIMSI(ctx); err == nil {
+	if mcc, mnc, err := u.GetHomePLMN(ctx); err == nil {
 		meta.NativeMCC = mcc
 		meta.NativeMNC = mnc
 	}
@@ -1570,51 +1567,29 @@ func (u *UIMService) readOPLRecords(ctx context.Context, fileID uint16) ([]OPLRe
 	return records, nil
 }
 
-func (u *UIMService) GetNativeMCCMNC(ctx context.Context) (mcc string, mnc string, err error) {
-	if opl, oplErr := u.GetOPLRecords(ctx); oplErr == nil {
-		if mcc, mnc, ok := nativeMCCMNCFromOPLRecords(opl); ok {
-			return mcc, mnc, nil
-		}
+// GetHomePLMN reads the SIM home PLMN using EF-AD's declared MNC length and
+// the MCC/MNC digits in EF-IMSI. EF-OPL is an operator-location list, not the
+// authoritative home PLMN, so it is intentionally not consulted here.
+func (u *UIMService) GetHomePLMN(ctx context.Context) (mcc string, mnc string, err error) {
+	adData, err := u.readSIMTransparentFallback(ctx, 0x6FAD)
+	if err != nil {
+		return "", "", fmt.Errorf("mnc_length_unknown: read EF_AD: %w", err)
 	}
-	return u.getNativeMCCMNCFromIMSI(ctx)
-}
+	if len(adData) < 4 || (adData[3] != 0x02 && adData[3] != 0x03) {
+		return "", "", fmt.Errorf("mnc_length_unknown: EF_AD length is invalid")
+	}
 
-func (u *UIMService) getNativeMCCMNCFromIMSI(ctx context.Context) (mcc string, mnc string, err error) {
-	// 1. 获取 IMSI
 	imsi, err := u.GetIMSI(ctx)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to get IMSI: %w", err)
+		return "", "", fmt.Errorf("read IMSI: %w", err)
 	}
-	if len(imsi) < 5 {
-		return "", "", fmt.Errorf("invalid IMSI length: %s", imsi)
-	}
+	return homePLMNFromIMSIAndLength(imsi, int(adData[3]))
+}
 
-	// 2. 尝试读取 EF_AD (0x6FAD) 获取 MNC 长度
-	mncLen := 2 // 默认安全回退到 2 位
-	adData, adErr := u.ReadTransparentWithSession(ctx, 0x00, 0x6FAD, []byte{0x00, 0x3F, 0xFF, 0x7F})
-	if adErr != nil {
-		adData, adErr = u.ReadTransparentWithSession(ctx, 0x00, 0x6FAD, []byte{0x20, 0x7F})
-		if adErr != nil {
-			adData, _ = u.ReadTransparentWithSession(ctx, 0x00, 0x6FAD, []byte{})
-		}
-	}
-
-	// EF_AD 文件如果存在且长度足够，第 4 字节（索引为 3）存放了 MNC 的长度
-	if len(adData) >= 4 {
-		// 第 4 字节规定了 MNC 位数 (0x02 或 0x03)
-		if adData[3] == 0x02 || adData[3] == 0x03 {
-			mncLen = int(adData[3])
-		}
-	}
-
-	if len(imsi) < 3+mncLen {
-		return "", "", fmt.Errorf("invalid IMSI length %d for MNC length %d", len(imsi), mncLen)
-	}
-
-	mcc = imsi[0:3]
-	mnc = imsi[3 : 3+mncLen]
-
-	return mcc, mnc, nil
+// GetNativeMCCMNC is retained for callers using the older name. Its
+// semantics are now the strict SIM home PLMN semantics of GetHomePLMN.
+func (u *UIMService) GetNativeMCCMNC(ctx context.Context) (mcc string, mnc string, err error) {
+	return u.GetHomePLMN(ctx)
 }
 
 func decodeEFSPN(data []byte) (string, error) {

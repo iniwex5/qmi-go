@@ -4,6 +4,7 @@ package qmi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -79,7 +80,29 @@ func waitForProxyStart(ctx context.Context, proxyPath string, attempt *proxyStar
 	select {
 	case <-attempt.done:
 		if attempt.err != nil {
-			return nil, attempt.err
+			var lastErr error
+			for {
+				if err := ctx.Err(); err != nil {
+					return nil, errors.Join(attempt.err, lastErr, fmt.Errorf("wait for qmi-proxy %q startup: %w", proxyPath, err))
+				}
+				timer := time.NewTimer(proxyRetryDelay)
+				select {
+				case <-ctx.Done():
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
+					}
+					return nil, errors.Join(attempt.err, lastErr, fmt.Errorf("wait for qmi-proxy %q startup: %w", proxyPath, ctx.Err()))
+				case <-timer.C:
+				}
+				conn, err := dialProxyHook(ctx, proxyPath)
+				if err == nil {
+					return conn, nil
+				}
+				lastErr = err
+			}
 		}
 		conn, err := dialProxyHook(ctx, proxyPath)
 		if err != nil {

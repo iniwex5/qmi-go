@@ -601,3 +601,48 @@ func successfulPDNOps(deleteMux func(string, uint8) error) pdnOps {
 		releaseWDS:       func(*qmi.WDSService) error { return nil },
 	}
 }
+
+func TestOpenPDNRejectsMuxHeldByLiveSession(t *testing.T) {
+	m := newCoexistTestManager(t, "qmimux0", 1)
+	m.dataPlane.sessions = map[uint64]*managedPDNSession{
+		7: {closeDone: make(chan struct{}), muxID: 2, snapshot: PDNSnapshot{ID: 7, InterfaceName: "qmimux1"}},
+	}
+	addMuxCalled := false
+	deleteMuxCalled := false
+	m.pdnOps = successfulPDNOps(func(string, uint8) error {
+		deleteMuxCalled = true
+		return nil
+	})
+	m.pdnOps.addMux = func(string, uint8) (string, error) {
+		addMuxCalled = true
+		return "qmimux1", nil
+	}
+
+	_, err := m.OpenPDN(context.Background(), PDNRequest{APN: "ims", MuxID: 2, IPFamily: qmi.IpFamilyV4})
+	if !errors.Is(err, ErrPDNMuxConflict) {
+		t.Fatalf("err = %v, want ErrPDNMuxConflict", err)
+	}
+	if addMuxCalled {
+		t.Fatal("OpenPDN called addMux for a mux held by a live session")
+	}
+	if deleteMuxCalled {
+		t.Fatal("OpenPDN deleted a mux while rejecting a conflicting session")
+	}
+}
+
+func TestOpenPDNAllowsDistinctMuxWhileAnotherSessionIsLive(t *testing.T) {
+	m := newCoexistTestManager(t, "qmimux0", 1)
+	m.dataPlane.sessions = map[uint64]*managedPDNSession{
+		7: {closeDone: make(chan struct{}), muxID: 2, snapshot: PDNSnapshot{ID: 7, InterfaceName: "qmimux1"}},
+	}
+	m.pdnOps = successfulPDNOps(func(string, uint8) error { return nil })
+	m.pdnOps.addMux = func(string, uint8) (string, error) { return "qmimux2", nil }
+
+	session, err := m.OpenPDN(context.Background(), PDNRequest{APN: "internet", MuxID: 3, IPFamily: qmi.IpFamilyV4})
+	if err != nil {
+		t.Fatalf("OpenPDN() with a distinct mux error = %v", err)
+	}
+	if got := session.Snapshot().InterfaceName; got != "qmimux2" {
+		t.Fatalf("InterfaceName = %q, want qmimux2", got)
+	}
+}

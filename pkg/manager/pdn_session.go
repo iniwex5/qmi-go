@@ -199,6 +199,11 @@ func (m *Manager) OpenPDN(ctx context.Context, req PDNRequest) (PDNSession, erro
 	if req.MuxID == 0 || req.MuxID == topology.DefaultMuxID {
 		return nil, fmt.Errorf("%w: mux ID %d", ErrPDNMuxConflict, req.MuxID)
 	}
+	for _, session := range m.dataPlane.sessions {
+		if session != nil && session.muxID == req.MuxID {
+			return nil, fmt.Errorf("%w: mux ID %d is in use by PDN session %d", ErrPDNMuxConflict, req.MuxID, session.snapshot.ID)
+		}
+	}
 	if m.dataPlane.reservedMuxes == nil {
 		m.dataPlane.reservedMuxes = make(map[uint8]uint64)
 	}
