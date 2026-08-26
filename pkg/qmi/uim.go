@@ -1562,9 +1562,10 @@ func (u *UIMService) readOPLRecords(ctx context.Context, fileID uint16) ([]OPLRe
 	return records, nil
 }
 
-// GetHomePLMN reads the SIM home PLMN using EF-AD's declared MNC length and
-// the MCC/MNC digits in EF-IMSI. EF-OPL is an operator-location list, not the
-// authoritative home PLMN, so it is intentionally not consulted here.
+// GetHomePLMN resolves the subscription home PLMN from EF-IMSI and EF-AD.
+// EF-AD is authoritative for the two- or three-digit MNC width; selector
+// files such as EF-HPLMNwAcT and EF-EHPLMN describe roaming preferences and
+// are not an IMS home-PLMN source.
 func (u *UIMService) GetHomePLMN(ctx context.Context) (mcc string, mnc string, err error) {
 	adData, err := u.readSIMTransparentFallback(ctx, 0x6FAD)
 	if err != nil {
@@ -1699,29 +1700,6 @@ func decodeOPLRecord(record int, data []byte) (OPLRecord, bool) {
 		RawHex:    raw,
 	}
 	return out, out.PLMN != "" || out.RawHex != ""
-}
-
-func nativeMCCMNCFromOPLRecords(records []OPLRecord) (mcc string, mnc string, ok bool) {
-	for _, rec := range records {
-		plmn := strings.TrimSpace(rec.PLMN)
-		if len(plmn) != 5 && len(plmn) != 6 {
-			continue
-		}
-		if !isExactDecimalPLMN(plmn) {
-			continue
-		}
-		return plmn[:3], plmn[3:], true
-	}
-	return "", "", false
-}
-
-func isExactDecimalPLMN(plmn string) bool {
-	for i := 0; i < len(plmn); i++ {
-		if plmn[i] < '0' || plmn[i] > '9' {
-			return false
-		}
-	}
-	return true
 }
 
 func decodeSIMServiceTable(kind string, data []byte) *SIMServiceTable {
