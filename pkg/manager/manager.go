@@ -306,6 +306,7 @@ type Manager struct {
 	openLogicalChannelHook            func(ctx context.Context, slot uint8, aid []byte) (byte, error)
 	closeLogicalChannelHook           func(ctx context.Context, slot uint8, channel uint8) error
 	sendAPDUHook                      func(ctx context.Context, slot uint8, channel uint8, command []byte) ([]byte, error)
+	uimAuthenticateHook               func(ctx context.Context, sessionType uint8, aid []byte, authContext uint8, data []byte) (*qmi.UIMAuthenticateResult, error)
 	newWDSService                     func(ctx context.Context, client *qmi.Client) (*qmi.WDSService, error)
 	imsProbeOps                       imsProbeOps
 	newNASService                     func(ctx context.Context, client *qmi.Client) (*qmi.NASService, error)
@@ -2091,6 +2092,44 @@ func (m *Manager) sendAPDUContextUngated(ctx context.Context, slot uint8, channe
 	return withUIMRecoveryValue(m, "SendAPDU", func(uim *qmi.UIMService) ([]byte, error) {
 		return uim.SendAPDU(ctx, slot, channel, command)
 	})
+}
+
+// UIMAuthenticateContext runs a QMI UIM Authenticate on the given session using the
+// caller context, without opening a logical channel. data and the returned result are
+// secrets and must not be logged.
+func (m *Manager) UIMAuthenticateContext(ctx context.Context, sessionType uint8, aid []byte, authContext uint8, data []byte) (*qmi.UIMAuthenticateResult, error) {
+	return withCardAccessValue(m, ctx, func() (*qmi.UIMAuthenticateResult, error) {
+		return m.uimAuthenticateContextUngated(ctx, sessionType, aid, authContext, data)
+	})
+}
+
+func (m *Manager) uimAuthenticateContextUngated(ctx context.Context, sessionType uint8, aid []byte, authContext uint8, data []byte) (*qmi.UIMAuthenticateResult, error) {
+	if m.uimAuthenticateHook != nil {
+		return m.uimAuthenticateHook(ctx, sessionType, aid, authContext, data)
+	}
+	return withUIMRecoveryValue(m, "UIMAuthenticate", uimAuthenticateResendGuard(func(uim *qmi.UIMService) (*qmi.UIMAuthenticateResult, error) {
+		return uim.Authenticate(ctx, sessionType, aid, authContext, data)
+	}))
+}
+
+// uimAuthenticateResendGuard stops withUIMRecoveryValue's rebind retry from resending
+// an Authenticate that may already have reached the card. Running the same RAND/AUTN
+// twice consumes the card's sequence number, so only failures that prove the request
+// never got there (client/service not ready) may be resent; after a timeout or a
+// card-reported status word the first error is returned again.
+func uimAuthenticateResendGuard(fn func(uim *qmi.UIMService) (*qmi.UIMAuthenticateResult, error)) func(uim *qmi.UIMService) (*qmi.UIMAuthenticateResult, error) {
+	var final error
+	return func(uim *qmi.UIMService) (*qmi.UIMAuthenticateResult, error) {
+		if final != nil {
+			return nil, final
+		}
+		result, err := fn(uim)
+		var cardErr *qmi.UIMCardError
+		if isServiceTimeoutError(err) || errors.As(err, &cardErr) {
+			final = err
+		}
+		return result, err
+	}
 }
 
 // GetNativeMCCMNC 获取原生归属地 MCC 和 MNC

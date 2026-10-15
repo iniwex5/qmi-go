@@ -141,6 +141,7 @@ const (
 	UIMOpenLogicalChannel  uint16 = 0x0042 // QMIUIM_OPEN_LOGICAL_CHANNEL_REQ
 	UIMCloseLogicalChannel uint16 = 0x003F // QMIUIM_CLOSE_LOGICAL_CHANNEL_REQ
 	UIMSendAPDU            uint16 = 0x003B // QMIUIM_SEND_APDU_REQ
+	UIMAuthenticate        uint16 = 0x0034 // QMIUIM_AUTHENTICATE_REQ
 )
 
 // ============================================================================

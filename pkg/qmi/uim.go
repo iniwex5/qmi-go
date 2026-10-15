@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -65,6 +67,14 @@ const (
 	UIMSessionTypeNonProvisioningSlot3    uint8 = 16
 	UIMSessionTypeCardSlot3               uint8 = 19
 	UIMSessionTypeLogicalChannelSlot3     uint8 = 22
+)
+
+// UIM authentication contexts (eQMIUIMAuthenticationContexts in the Gobi API
+// GobiConnectionMgmtAPIEnums.h) used by Authenticate.
+const (
+	UIMAuthContextGSMSecurity    uint8 = 2
+	UIMAuthContext3GSecurity     uint8 = 3
+	UIMAuthContextIMSAKASecurity uint8 = 11
 )
 
 const (
@@ -180,6 +190,42 @@ type QMIUIM_PIN_STATE struct {
 type UIMCardResult struct {
 	SW1 uint8
 	SW2 uint8
+}
+
+// UIMCardError is a failed UIM request that also carries the card status word
+// reported in the response's card result TLV. Err is the underlying failure
+// (normally a *QMIError), so errors.As/Is keep working through Unwrap.
+type UIMCardError struct {
+	Operation string
+	SW1, SW2  byte
+	Err       error
+}
+
+func (e *UIMCardError) Error() string {
+	if e.Err == nil {
+		return fmt.Sprintf("%s: card SW=%02X%02X", e.Operation, e.SW1, e.SW2)
+	}
+	return fmt.Sprintf("%s: card SW=%02X%02X: %v", e.Operation, e.SW1, e.SW2, e.Err)
+}
+
+func (e *UIMCardError) Unwrap() error {
+	return e.Err
+}
+
+// UIMStatusWord returns the card status word SW1/SW2 of the failed request.
+// Callers outside this package may detect it through an interface carrying
+// exactly this method, without importing UIMCardError.
+func (e *UIMCardError) UIMStatusWord() (sw1, sw2 byte) {
+	return e.SW1, e.SW2
+}
+
+// UIMAuthenticateResult is the outcome of a successful UIM Authenticate request.
+// Data holds the raw authentication response content (for example RES/CK/IK or
+// AUTS) and is secret; do not log it.
+type UIMAuthenticateResult struct {
+	HasCardResult bool
+	SW1, SW2      byte
+	Data          []byte
 }
 
 type UIMRecordData struct {
@@ -794,6 +840,17 @@ func wrapUIMNotSupported(operation string, err error) error {
 	return err
 }
 
+// wrapUIMCardError attaches the card status word from the response's card result
+// TLV to a failed request. If the TLV is absent or malformed, err is returned
+// unchanged so the original failure is never masked.
+func wrapUIMCardError(operation string, cardResultTLV *TLV, err error) error {
+	card, ok, parseErr := parseUIMCardResult(cardResultTLV)
+	if parseErr != nil || !ok {
+		return err
+	}
+	return &UIMCardError{Operation: operation, SW1: card.SW1, SW2: card.SW2, Err: err}
+}
+
 func parseUIMCardResult(tlv *TLV) (UIMCardResult, bool, error) {
 	if tlv == nil {
 		return UIMCardResult{}, false, nil
@@ -1017,7 +1074,13 @@ func parseGetFileAttributesResponse(resp *Packet) (*UIMFileAttributes, error) {
 
 func parseOpenLogicalChannelResponse(resp *Packet) (byte, error) {
 	if err := resp.CheckResult(); err != nil {
-		return 0, wrapUIMNotSupported("open logical channel", err)
+		err = wrapUIMNotSupported("open logical channel", err)
+		var notSupported *NotSupportedError
+		if errors.As(err, &notSupported) {
+			return 0, err
+		}
+		// TLV 0x11 (card result) may be present even though the request failed.
+		return 0, wrapUIMCardError("open logical channel", FindTLV(resp.TLVs, 0x11), err)
 	}
 	tlv := FindTLV(resp.TLVs, 0x10)
 	if tlv == nil || len(tlv.Value) < 1 {
@@ -1048,6 +1111,59 @@ func parseSendAPDUResponse(resp *Packet) ([]byte, error) {
 	return append([]byte(nil), tlv.Value[2:2+responseLen]...), nil
 }
 
+func buildUIMAuthenticateTLVs(sessionType uint8, aid []byte, authContext uint8, data []byte) ([]TLV, error) {
+	if len(aid) > math.MaxUint8 {
+		return nil, fmt.Errorf("UIM authenticate AID too long: %d bytes", len(aid))
+	}
+	// The authentication data TLV carries a 3-byte prefix and must itself fit a u16 TLV length.
+	if len(data) > math.MaxUint16-3 {
+		return nil, fmt.Errorf("UIM authenticate data too long: %d bytes", len(data))
+	}
+	value := make([]byte, 3+len(data))
+	value[0] = authContext
+	binary.LittleEndian.PutUint16(value[1:3], uint16(len(data)))
+	copy(value[3:], data)
+	return []TLV{
+		buildUIMSessionTLV(sessionType, aid),
+		{Type: 0x02, Value: value},
+	}, nil
+}
+
+// parseUIMAuthenticateResponse never includes the authentication data in errors.
+func parseUIMAuthenticateResponse(resp *Packet) (*UIMAuthenticateResult, error) {
+	if err := resp.CheckResult(); err != nil {
+		err = wrapUIMNotSupported("authenticate", err)
+		var notSupported *NotSupportedError
+		if errors.As(err, &notSupported) {
+			return nil, err
+		}
+		return nil, wrapUIMCardError("authenticate", FindTLV(resp.TLVs, 0x10), err)
+	}
+
+	result := &UIMAuthenticateResult{}
+	cardResult, hasCardResult, err := parseUIMCardResult(FindTLV(resp.TLVs, 0x10))
+	if err != nil {
+		return nil, err
+	}
+	result.HasCardResult = hasCardResult
+	result.SW1, result.SW2 = cardResult.SW1, cardResult.SW2
+
+	// TLV 0x12 means the content will arrive in an indication; we never request that.
+	if FindTLV(resp.TLVs, 0x12) != nil {
+		return nil, fmt.Errorf("authenticate response deferred to indication")
+	}
+	tlv := FindTLV(resp.TLVs, 0x11)
+	if tlv == nil || len(tlv.Value) < 2 {
+		return nil, fmt.Errorf("authenticate result TLV missing or too short")
+	}
+	length := int(binary.LittleEndian.Uint16(tlv.Value[0:2]))
+	if len(tlv.Value) < 2+length {
+		return nil, fmt.Errorf("authenticate result truncated")
+	}
+	result.Data = append([]byte(nil), tlv.Value[2:2+length]...)
+	return result, nil
+}
+
 // OpenLogicalChannel opens a logical channel on the target slot and selects the given AID.
 func (u *UIMService) OpenLogicalChannel(ctx context.Context, slot uint8, aid []byte) (byte, error) {
 	resp, err := u.client.SendRequest(ctx, ServiceUIM, u.clientID, UIMOpenLogicalChannel, buildOpenLogicalChannelTLVs(slot, aid))
@@ -1073,6 +1189,21 @@ func (u *UIMService) SendAPDU(ctx context.Context, slot uint8, channel uint8, co
 		return nil, err
 	}
 	return parseSendAPDUResponse(resp)
+}
+
+// Authenticate runs a card authentication (for example USIM 3G security / IMS AKA)
+// on the given UIM session without opening a logical channel. The request data and
+// the response data are secrets and are never logged or put into errors.
+func (u *UIMService) Authenticate(ctx context.Context, sessionType uint8, aid []byte, authContext uint8, data []byte) (*UIMAuthenticateResult, error) {
+	tlvs, err := buildUIMAuthenticateTLVs(sessionType, aid, authContext, data)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := u.client.SendRequest(ctx, ServiceUIM, u.clientID, UIMAuthenticate, tlvs)
+	if err != nil {
+		return nil, err
+	}
+	return parseUIMAuthenticateResponse(resp)
 }
 
 // GetSlotStatus returns physical/logical slot mapping and optional eUICC details.

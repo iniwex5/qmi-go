@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/iniwex5/qmi-go/pkg/qmi"
 )
 
 func TestCardIOQuietWindowBlocksBackgroundCardAccess(t *testing.T) {
@@ -95,6 +97,9 @@ func TestCardIOQuietWindowBlocksNamedCardOperations(t *testing.T) {
 	m.getIMSIStrictHook = func(context.Context) (string, error) { return "460001357924680", nil }
 	m.sendAPDUHook = func(context.Context, uint8, uint8, []byte) ([]byte, error) { return []byte{0x90, 0x00}, nil }
 	m.openLogicalChannelHook = func(context.Context, uint8, []byte) (byte, error) { return 1, nil }
+	m.uimAuthenticateHook = func(context.Context, uint8, []byte, uint8, []byte) (*qmi.UIMAuthenticateResult, error) {
+		return &qmi.UIMAuthenticateResult{}, nil
+	}
 
 	release, err := m.BeginCardIOQuietWindow(context.Background())
 	if err != nil {
@@ -124,6 +129,10 @@ func TestCardIOQuietWindowBlocksNamedCardOperations(t *testing.T) {
 		}},
 		{"LogicalChannel", func(ctx context.Context) error {
 			_, err := m.OpenLogicalChannelContext(ctx, 1, genericUSIMAID)
+			return err
+		}},
+		{"Authenticate", func(ctx context.Context) error {
+			_, err := m.UIMAuthenticateContext(ctx, qmi.UIMSessionTypePrimaryGWProvisioning, nil, qmi.UIMAuthContext3GSecurity, []byte{0x00})
 			return err
 		}},
 		{"APDU", func(ctx context.Context) error {

@@ -33,6 +33,9 @@ func TestUIMMessageIDMappingsMatchSpec(t *testing.T) {
 	if UIMPowerOnSIM != 0x0031 {
 		t.Fatalf("UIMPowerOnSIM = 0x%04X, want 0x0031", UIMPowerOnSIM)
 	}
+	if UIMAuthenticate != 0x0034 {
+		t.Fatalf("UIMAuthenticate = 0x%04X, want 0x0034", UIMAuthenticate)
+	}
 	if UIMChangeProvisioningSession != 0x0038 {
 		t.Fatalf("UIMChangeProvisioningSession = 0x%04X, want 0x0038", UIMChangeProvisioningSession)
 	}
