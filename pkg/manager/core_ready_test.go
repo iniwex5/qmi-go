@@ -269,6 +269,99 @@ func TestGetIMSIStrictLiveUsesUIMRecoveryFallback(t *testing.T) {
 	}
 }
 
+// getIMSIStrictLive 的顺序是 UIM ReadTransparent 优先、DMS 兜底：DMS 可能是固件缓存，
+// 同 ICCID 下 EF_IMSI 翻转时会给旧值，所以必须先读卡文件。
+func TestGetIMSIStrictLiveReadsUIMBeforeDMS(t *testing.T) {
+	var order []string
+	m := newRecoveryTestManager()
+	m.ensureUIMServiceHook = func() (*qmi.UIMService, error) {
+		order = append(order, "uim")
+		return nil, errors.New("uim unavailable")
+	}
+	m.ensureDMSServiceHook = func() (*qmi.DMSService, error) {
+		order = append(order, "dms")
+		return nil, errors.New("dms unavailable")
+	}
+
+	_, err := m.GetIMSIStrictLive(context.Background())
+
+	if err == nil {
+		t.Fatal("expected error when both channels are unavailable")
+	}
+	if got := strings.Join(order, ","); got != "uim,dms" {
+		t.Fatalf("GetIMSIStrictLive channel order=%q, want uim,dms", got)
+	}
+	for _, want := range []string{"uim unavailable", "dms unavailable"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("err=%v, want it to carry both channel errors (missing %q)", err, want)
+		}
+	}
+}
+
+// GetIMSI / GetIMSILive 的公开入口都复用 GetIMSIStrictLive，因此一并走 UIM 优先。
+func TestGetIMSIFollowsUIMFirstOrder(t *testing.T) {
+	var order []string
+	m := newRecoveryTestManager()
+	m.ensureUIMServiceHook = func() (*qmi.UIMService, error) {
+		order = append(order, "uim")
+		return nil, errors.New("uim unavailable")
+	}
+	m.ensureDMSServiceHook = func() (*qmi.DMSService, error) {
+		order = append(order, "dms")
+		return nil, errors.New("dms unavailable")
+	}
+
+	_, _ = m.GetIMSI(context.Background())
+
+	if got := strings.Join(order, ","); got != "uim,dms" {
+		t.Fatalf("GetIMSI channel order=%q, want uim,dms", got)
+	}
+}
+
+func TestReadIMSIUIMFirstSkipsDMSWhenUIMSucceeds(t *testing.T) {
+	dmsCalls := 0
+	imsi, err := readIMSIUIMFirst(
+		func() (string, error) { return "515660000000001", nil },
+		func() (string, error) { dmsCalls++; return "204040000000001", nil },
+	)
+	if err != nil || imsi != "515660000000001" {
+		t.Fatalf("readIMSIUIMFirst() = %q, %v; want the UIM value", imsi, err)
+	}
+	if dmsCalls != 0 {
+		t.Fatalf("DMS consulted %d times although UIM succeeded", dmsCalls)
+	}
+}
+
+func TestReadIMSIUIMFirstFallsBackToDMSOnlyWhenUIMFails(t *testing.T) {
+	tests := []struct {
+		name   string
+		uimVal string
+		uimErr error
+	}{
+		{"uim_error", "", errors.New("uim not ready")},
+		{"uim_empty", "", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			imsi, err := readIMSIUIMFirst(
+				func() (string, error) { return tt.uimVal, tt.uimErr },
+				func() (string, error) { return "204040000000001", nil },
+			)
+			if err != nil || imsi != "204040000000001" {
+				t.Fatalf("readIMSIUIMFirst() = %q, %v; want DMS fallback value", imsi, err)
+			}
+		})
+	}
+
+	_, err := readIMSIUIMFirst(
+		func() (string, error) { return "", errors.New("uim fail") },
+		func() (string, error) { return "", errors.New("dms NotSupported") },
+	)
+	if err == nil || !strings.Contains(err.Error(), "uim fail") || !strings.Contains(err.Error(), "dms NotSupported") {
+		t.Fatalf("both-fail err=%v, want both channel errors", err)
+	}
+}
+
 func TestSnapshotIdentityGetterReturnsCopyForPointerFields(t *testing.T) {
 	m := newRecoveryTestManager()
 	mode := qmi.ModeOnline

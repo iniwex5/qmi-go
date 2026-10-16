@@ -309,25 +309,33 @@ func (m *Manager) getIMSIStrictLive(ctx context.Context) (string, error) {
 		return m.getIMSIStrictHook(ctx)
 	}
 
-	var lastErr error
+	return readIMSIUIMFirst(
+		func() (string, error) {
+			return withUIMRecoveryValue(m, "GetIMSI.UIM", func(uim *qmi.UIMService) (string, error) {
+				return uim.GetIMSI(ctx)
+			})
+		},
+		func() (string, error) {
+			return withDMSRecoveryValue(m, "GetIMSI.DMS", func(dms *qmi.DMSService) (string, error) {
+				return dms.GetIMSI(ctx)
+			})
+		},
+	)
+}
 
-	// 优先尝试 DMS 获取 (DMS 通常最稳定且自带缓存)
-	imsi, err := withDMSRecoveryValue(m, "GetIMSI.DMS", func(dms *qmi.DMSService) (string, error) {
-		return dms.GetIMSI(ctx)
-	})
-	if err == nil && imsi != "" {
+// readIMSIUIMFirst 实现 IMSI 的读取顺序：UIM ReadTransparent 直读 EF_IMSI(3F00/7FFF/6F07) 优先，
+// DMS 只作兜底。
+//
+func readIMSIUIMFirst(readUIM, readDMS func() (string, error)) (string, error) {
+	imsi, uimErr := readUIM()
+	if uimErr == nil && imsi != "" {
 		return imsi, nil
 	}
-	lastErr = err
-
-	// 降级尝试 UIM 透明获取
-	imsi, err = withUIMRecoveryValue(m, "GetIMSI.UIM", func(uim *qmi.UIMService) (string, error) {
-		return uim.GetIMSI(ctx)
-	})
-	if err == nil && imsi != "" {
+	imsi, dmsErr := readDMS()
+	if dmsErr == nil && imsi != "" {
 		return imsi, nil
 	}
-	return "", fmt.Errorf("DMS & UIM 双通道均无法获取 IMSI (UIM error: %v, DMS lastError: %v)", err, lastErr)
+	return "", fmt.Errorf("UIM & DMS 双通道均无法获取 IMSI (UIM error: %v, DMS error: %v)", uimErr, dmsErr)
 }
 
 // GetICCID 获取 SIM 卡 ICCID
