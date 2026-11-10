@@ -25,12 +25,13 @@ type LinuxConfigurator struct{}
 var qmapMuxCreateMu sync.Mutex
 
 var (
-	netlinkLinkByName = netlink.LinkByName
-	netlinkAddrList   = netlink.AddrList
-	netlinkAddrAdd    = netlink.AddrAdd
-	netlinkAddrDel    = netlink.AddrDel
-	netlinkRouteList  = netlink.RouteList
-	netlinkRouteDel   = netlink.RouteDel
+	netlinkLinkByName  = netlink.LinkByName
+	netlinkAddrList    = netlink.AddrList
+	netlinkAddrAdd     = netlink.AddrAdd
+	netlinkAddrDel     = netlink.AddrDel
+	netlinkRouteList   = netlink.RouteList
+	netlinkRouteAppend = netlink.RouteAppend
+	netlinkRouteDel    = netlink.RouteDel
 )
 
 // sysClassNetRoot is the base of the sysfs netdev tree. A package variable
@@ -118,16 +119,20 @@ func (l *LinuxConfigurator) FlushAddresses(ifname string) error {
 }
 
 func (l *LinuxConfigurator) AddDefaultRoute(ifname string, gateway net.IP) error {
-	link, err := netlink.LinkByName(ifname)
+	if len(gateway) == 0 || gateway.IsUnspecified() {
+		return l.AddDefaultRouteDirect(ifname, len(gateway) == net.IPv6len && gateway.To4() == nil)
+	}
+
+	link, err := netlinkLinkByName(ifname)
 	if err != nil {
 		return fmt.Errorf("interface %s not found: %w", ifname, err)
 	}
 
-	var dst *net.IPNet
+	family := netlink.FAMILY_V6
+	dst := &net.IPNet{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)}
 	if gateway.To4() != nil {
+		family = netlink.FAMILY_V4
 		dst = &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)}
-	} else {
-		dst = &net.IPNet{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)}
 	}
 
 	route := &netlink.Route{
@@ -137,25 +142,23 @@ func (l *LinuxConfigurator) AddDefaultRoute(ifname string, gateway net.IP) error
 		Priority:  5000, // High metric to avoid overriding system default route / 高跃点数避免覆盖系统默认路由
 	}
 
-	if err := netlink.RouteAdd(route); err != nil {
-		if !strings.Contains(err.Error(), "exists") {
-			return fmt.Errorf("failed to add default route: %w", err)
-		}
+	if err := replaceDefaultRoute(link, family, route); err != nil {
+		return fmt.Errorf("failed to add default route: %w", err)
 	}
 	return nil
 }
 
 func (l *LinuxConfigurator) AddDefaultRouteDirect(ifname string, ipv6 bool) error {
-	link, err := netlink.LinkByName(ifname)
+	link, err := netlinkLinkByName(ifname)
 	if err != nil {
 		return fmt.Errorf("interface %s not found: %w", ifname, err)
 	}
 
-	var dst *net.IPNet
+	family := netlink.FAMILY_V4
+	dst := &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)}
 	if ipv6 {
+		family = netlink.FAMILY_V6
 		dst = &net.IPNet{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)}
-	} else {
-		dst = &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)}
 	}
 
 	route := &netlink.Route{
@@ -164,12 +167,62 @@ func (l *LinuxConfigurator) AddDefaultRouteDirect(ifname string, ipv6 bool) erro
 		Priority:  512, // High metric / 高跃点数
 	}
 
-	if err := netlink.RouteAdd(route); err != nil {
+	if err := replaceDefaultRoute(link, family, route); err != nil {
+		return fmt.Errorf("failed to add default route: %w", err)
+	}
+	return nil
+}
+
+// replaceDefaultRoute makes route the only default route of its address family
+// on link, and uses RouteAppend (NLM_F_CREATE|NLM_F_APPEND) so equal-metric
+// default routes on different modem interfaces coexist in RT_TABLE_MAIN instead
+// of failing with EEXIST.
+func replaceDefaultRoute(link netlink.Link, family int, route *netlink.Route) error {
+	existing, err := netlinkRouteList(link, family)
+	if err != nil {
+		return fmt.Errorf("list existing routes: %w", err)
+	}
+	linkIndex := link.Attrs().Index
+	alreadyExists := false
+	for _, old := range existing {
+		old := old
+		if !isDefaultRoute(old, linkIndex) {
+			continue
+		}
+		if !alreadyExists && sameDefaultRoute(old, *route) {
+			alreadyExists = true
+			continue
+		}
+		if err := netlinkRouteDel(&old); err != nil {
+			return fmt.Errorf("remove stale default route: %w", err)
+		}
+	}
+	if alreadyExists {
+		return nil
+	}
+	if err := netlinkRouteAppend(route); err != nil {
 		if !strings.Contains(err.Error(), "exists") {
-			return fmt.Errorf("failed to add default route: %w", err)
+			return err
 		}
 	}
 	return nil
+}
+
+func isDefaultRoute(route netlink.Route, linkIndex int) bool {
+	if route.LinkIndex != linkIndex {
+		return false
+	}
+	if route.Dst == nil {
+		return true
+	}
+	ones, bits := route.Dst.Mask.Size()
+	return bits > 0 && ones == 0 && route.Dst.IP.IsUnspecified()
+}
+
+func sameDefaultRoute(a, b netlink.Route) bool {
+	return a.LinkIndex == b.LinkIndex &&
+		a.Priority == b.Priority &&
+		a.Gw.Equal(b.Gw)
 }
 
 func (l *LinuxConfigurator) FlushRoutes(ifname string) error {
