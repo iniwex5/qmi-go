@@ -921,3 +921,43 @@ func TestStopCancelsRecoveryRetryWhenCoreNotReadyDisconnected(t *testing.T) {
 		t.Fatal("expected Stop() to cancel manager context")
 	}
 }
+
+// GetMSISDN 在卡还没初始化完时返回“设备未就绪”，这不是 DMS client 失效：
+// 重绑 client 治不好，还会把正在初始化的会话拆掉，所以必须原样返回给调用方重试。
+func TestDMSGetMSISDNCardNotReadySkipsServiceRecovery(t *testing.T) {
+	m := newRecoveryTestManager()
+	m.coreReady = true
+	m.state = StateDisconnected
+	m.ensureDMSServiceHook = func() (*qmi.DMSService, error) { return &qmi.DMSService{}, nil }
+
+	rebindCalls := 0
+	m.rebindDMSServiceHook = func(reason string) (*qmi.DMSService, error) {
+		rebindCalls++
+		return &qmi.DMSService{}, nil
+	}
+
+	attempts := 0
+	_, err := withDMSRecoveryValue(m, "GetMSISDN", func(dms *qmi.DMSService) (string, error) {
+		attempts++
+		return "", &qmi.QMIError{
+			Service:   qmi.ServiceDMS,
+			MessageID: qmi.DMSGetMSISDN,
+			Result:    0x0001,
+			ErrorCode: qmi.QMIErrDeviceNotReady,
+		}
+	})
+	if err == nil {
+		t.Fatal("expected card-not-ready error to be returned")
+	}
+	if attempts != 1 {
+		t.Fatalf("expected a single attempt without rebind retry, got %d", attempts)
+	}
+	if rebindCalls != 0 {
+		t.Fatalf("expected no DMS rebind for card-not-ready read, got %d", rebindCalls)
+	}
+	select {
+	case evt := <-m.eventCh:
+		t.Fatalf("expected no core recovery event, got %v", evt)
+	case <-time.After(150 * time.Millisecond):
+	}
+}

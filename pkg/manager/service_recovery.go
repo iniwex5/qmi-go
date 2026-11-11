@@ -56,6 +56,33 @@ func shouldRecoverServiceError(service string, err error, serviceUnavailableText
 		strings.Contains(lowerErr, "allocate client id request failed")
 }
 
+// dmsCardBackedReadOps 列出取值只能来自 SIM/USIM 的 DMS 操作。
+// 这些操作报“设备未就绪”说的是卡还没初始化完，不是 DMS client 失效：
+// 重绑 client（乃至重置 QMI Core）既治不好，还会把正在初始化的会话拆掉。
+// 调用方（vohive 的本机号码收敛）自己按退避重试，这里只把错误原样交上去。
+var dmsCardBackedReadOps = map[string]struct{}{
+	"GetMSISDN": {},
+}
+
+// isDMSCardNotReadyReadError 判断 err 是否表示“卡还没就绪”，只对 dmsCardBackedReadOps 生效。
+func isDMSCardNotReadyReadError(op string, err error) bool {
+	if _, ok := dmsCardBackedReadOps[strings.TrimSpace(op)]; !ok {
+		return false
+	}
+	qe := qmi.GetQMIError(err)
+	if qe == nil {
+		return false
+	}
+	if qe.Service != 0 && qe.Service != qmi.ServiceDMS {
+		return false
+	}
+	switch qe.ErrorCode {
+	case qmi.QMIErrDeviceNotReady, qmi.QMIErrNetworkNotReady:
+		return true
+	}
+	return false
+}
+
 func isServiceTimeoutError(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) {
 		return false
@@ -315,6 +342,14 @@ func withDMSRecoveryValue[T any](m *Manager, op string, fn func(dms *qmi.DMSServ
 		m.noteServiceOperationSuccess("DMS", op)
 		return result, nil
 	}
+	if isDMSCardNotReadyReadError(op, err) {
+		m.log.
+			WithField("service_name", "DMS").
+			WithField("op", op).
+			WithField("error_code", fmt.Sprintf("0x%04x", qmi.GetQMIError(err).ErrorCode)).
+			Debug("DMS card-backed read reported card not ready; skipping service recovery and leaving the retry to the caller")
+		return result, err
+	}
 	if !m.shouldRecoverDMSError(op, err) {
 		return result, err
 	}
@@ -335,7 +370,7 @@ func withDMSRecoveryValue[T any](m *Manager, op string, fn func(dms *qmi.DMSServ
 		m.log.WithField("service_name", "DMS").WithField("op", op).WithField("phase", "retry").Info("DMS operation recovered after rebind")
 		return retryResult, nil
 	}
-	if m.shouldRecoverDMSError(op, retryErr) {
+	if m.shouldRecoverDMSError(op, retryErr) && !isDMSCardNotReadyReadError(op, retryErr) {
 		m.logServiceRecovery("DMS", op, "retry", retryErr, "DMS operation still failing after rebind; escalating to core recovery")
 		m.triggerCoreRecoveryFromService("DMS", op, "retry", retryErr)
 	}
